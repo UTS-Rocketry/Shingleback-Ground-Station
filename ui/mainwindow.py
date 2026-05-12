@@ -5,8 +5,13 @@ import pyqtgraph as pg
 
 #from core.dummy_worker import DummyWorker
 
-from core.serial_worker import SerialWorker
+#from core.serial_worker import SerialWorker
 from core.parser import parse_line
+from core.parser import parse_telemetry
+
+from core.lora_worker import LoRaWorker
+from core.parser import parse_telemetry
+
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -124,9 +129,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
 
         # Worker
-        self.worker = SerialWorker('/dev/ttyUSB0', 115200)
-        #self.worker = DummyWorker()
-        self.worker.data_received.connect(self.on_data)
+        from core.lora_worker import LoRaWorker
+        from core.parser import parse_telemetry
+
+        self.worker = LoRaWorker()
+        self.worker.data_received.connect(self.on_lora_data)
+        self.worker.error_occurred.connect(lambda e: self.terminal.append(f"[ERROR] {e}"))
         self.worker.start()
 
     def on_data(self, line):
@@ -168,3 +176,55 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hx_val.setText(f"X: {hx:.1f}")
         self.hy_val.setText(f"Y: {hy:.1f}")
         self.hz_val.setText(f"Z: {hz:.1f}")
+
+    def on_lora_data(self, raw: bytes):
+        parsed = parse_telemetry(raw)
+        if parsed is None:
+            self.terminal.append(f"[BAD PACKET] {raw.hex()}")
+            self.terminal.ensureCursorVisible()
+            return
+
+        self.terminal.append(
+            f"[{parsed['sequence']:03d}] "
+            f"Alt: {parsed['altitude']:.2f}m | "
+            f"P: {parsed['pressure']:.1f}Pa | "
+            f"T: {parsed['temperature']:.1f}C | "
+            f"Accel X:{parsed['accel']['x']:.1f} Y:{parsed['accel']['y']:.1f} Z:{parsed['accel']['z']:.1f} | "
+            f"IMU X:{parsed['imu_accel']['x']:.1f} Y:{parsed['imu_accel']['y']:.1f} Z:{parsed['imu_accel']['z']:.1f} | "
+            f"Gyro X:{parsed['imu_gyro']['x']:.1f} Y:{parsed['imu_gyro']['y']:.1f} Z:{parsed['imu_gyro']['z']:.1f} | "
+            f"State: {parsed['flight_state']}"
+        )
+        self.terminal.ensureCursorVisible()
+        alt = parsed['altitude']
+        xl_x, xl_y, xl_z = parsed['accel']['x'], parsed['accel']['y'], parsed['accel']['z']
+        gy_x, gy_y, gy_z = parsed['imu_gyro']['x'], parsed['imu_gyro']['y'], parsed['imu_gyro']['z']
+        hx, hy, hz = parsed['imu_accel']['x'], parsed['imu_accel']['y'], parsed['imu_accel']['z']
+
+        self.alt.append(alt)
+        self.xl_x.append(xl_x)
+        self.xl_y.append(xl_y)
+        self.xl_z.append(xl_z)
+        self.gy_x.append(gy_x)
+        self.gy_y.append(gy_y)
+        self.gy_z.append(gy_z)
+
+        self.alt_curve.setData(list(self.alt))
+        self.gy_x_curve.setData(list(self.gy_x))
+        self.gy_y_curve.setData(list(self.gy_y))
+        self.gy_z_curve.setData(list(self.gy_z))
+        self.xl_x_curve.setData(list(self.xl_x))
+        self.xl_y_curve.setData(list(self.xl_y))
+        self.xl_z_curve.setData(list(self.xl_z))
+
+        self.alt_val.setText(f"Alt: {alt:.2f} m")
+        self.xl_x_val.setText(f"X: {xl_x:.1f}")
+        self.xl_y_val.setText(f"Y: {xl_y:.1f}")
+        self.xl_z_val.setText(f"Z: {xl_z:.1f}")
+        self.gy_x_val.setText(f"X: {gy_x:.1f}")
+        self.gy_y_val.setText(f"Y: {gy_y:.1f}")
+        self.gy_z_val.setText(f"Z: {gy_z:.1f}")
+        self.hx_val.setText(f"X: {hx:.1f}")
+        self.hy_val.setText(f"Y: {hy:.1f}")
+        self.hz_val.setText(f"Z: {hz:.1f}")
+        self.status_val.setText("RX OK")
+        self.status_val.setStyleSheet("font-size: 14px; font-weight: bold; color: green;")
