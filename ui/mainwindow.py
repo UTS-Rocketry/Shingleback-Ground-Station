@@ -28,6 +28,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.xl_x = deque([0]*n, maxlen=n)
         self.xl_y = deque([0]*n, maxlen=n)
         self.xl_z = deque([0]*n, maxlen=n)
+        self.vel = deque([0]*n, maxlen=n)
 
         # --- Plots ---
         self.plot_widget = pg.GraphicsLayoutWidget()
@@ -46,6 +47,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.xl_x_curve = xl_plot.plot(pen='r', name="X")
         self.xl_y_curve = xl_plot.plot(pen='g', name="Y")
         self.xl_z_curve = xl_plot.plot(pen='b', name="Z")
+        self.plot_widget.nextRow()
+        
+        vel_plot = self.plot_widget.addPlot(title="Velocity (m/s)")
+        self.vel_curve = vel_plot.plot(pen='c')
 
         # --- Dashboard ---
         dashboard = QtWidgets.QWidget()
@@ -77,6 +82,11 @@ class MainWindow(QtWidgets.QMainWindow):
         dash_layout.addWidget(make_label("Altitude"))
         self.alt_val = make_value()
         dash_layout.addWidget(self.alt_val)
+        
+        # Velocity
+        dash_layout.addWidget(make_label("Velocity (m/s)"))
+        self.vel_val = make_value()
+        dash_layout.addWidget(self.vel_val)
 
         # IMU Accel
         dash_layout.addWidget(make_label("IMU Accel (mg)"))
@@ -187,6 +197,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.terminal.append(
             f"[{parsed['sequence']:03d}] "
             f"Alt: {parsed['altitude']:.2f}m | "
+            f"Vel: {parsed['velocity']:.2f}m/s | "
             f"P: {parsed['pressure']:.1f}Pa | "
             f"T: {parsed['temperature']:.1f}C | "
             f"Accel X:{parsed['accel']['x']:.1f} Y:{parsed['accel']['y']:.1f} Z:{parsed['accel']['z']:.1f} | "
@@ -196,6 +207,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.terminal.ensureCursorVisible()
         alt = parsed['altitude']
+        vel = parsed['velocity']
         xl_x, xl_y, xl_z = parsed['accel']['x'], parsed['accel']['y'], parsed['accel']['z']
         gy_x, gy_y, gy_z = parsed['imu_gyro']['x'], parsed['imu_gyro']['y'], parsed['imu_gyro']['z']
         hx, hy, hz = parsed['imu_accel']['x'], parsed['imu_accel']['y'], parsed['imu_accel']['z']
@@ -207,6 +219,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gy_x.append(gy_x)
         self.gy_y.append(gy_y)
         self.gy_z.append(gy_z)
+        self.vel.append(vel)
 
         self.alt_curve.setData(list(self.alt))
         self.gy_x_curve.setData(list(self.gy_x))
@@ -226,5 +239,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hx_val.setText(f"X: {hx:.1f}")
         self.hy_val.setText(f"Y: {hy:.1f}")
         self.hz_val.setText(f"Z: {hz:.1f}")
+        self.vel_val.setText(f"{vel:.2f} m/s")
         self.status_val.setText("RX OK")
         self.status_val.setStyleSheet("font-size: 14px; font-weight: bold; color: green;")

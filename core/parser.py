@@ -46,7 +46,7 @@ def crc16(data: bytes) -> int:
     return crc
 
 def parse_telemetry(data: bytes) -> dict | None:
-    if len(data) < 54:
+    if len(data) < 58:
         return None
 
     if data[0] != SYNC_WORD:
@@ -58,12 +58,13 @@ def parse_telemetry(data: bytes) -> dict | None:
     (altitude, pressure, temperature,
      x_mg, y_mg, z_mg,
      x_mg_imu, y_mg_imu, z_mg_imu,
-     x_gy, y_gy, z_gy) = struct.unpack('>ffffffffffff', data[3:51])
+     x_gy, y_gy, z_gy,
+     velocity) = struct.unpack('>fffffffffffff', data[3:55])
 
-    flight_state = data[51]
+    flight_state = data[55]
 
-    crc_received = (data[52] << 8) | data[53]
-    if crc16(data[:51]) != crc_received:
+    crc_received = (data[56] << 8) | data[57]
+    if crc16(data[:55]) != crc_received:
         return None
 
     return {
@@ -72,6 +73,7 @@ def parse_telemetry(data: bytes) -> dict | None:
         'altitude': altitude,
         'pressure': pressure,
         'temperature': temperature,
+        'velocity' : velocity,
         'accel': {'x': x_mg, 'y': y_mg, 'z': z_mg},
         'imu_accel': {'x': x_mg_imu, 'y': y_mg_imu, 'z': z_mg_imu},
         'imu_gyro': {'x': x_gy, 'y': y_gy, 'z': z_gy},
