@@ -46,9 +46,14 @@ def crc16(data: bytes) -> int:
     return crc
 
 def parse_telemetry(data: bytes) -> dict | None:
-    if len(data) < 58:
-        return None
+    # if len(data) < 62:
+    #     return None
+    
+    # data = data[4:]
 
+    if len(data) <  58:
+        return None 
+    
     if data[0] != SYNC_WORD:
         return None
 
@@ -60,11 +65,18 @@ def parse_telemetry(data: bytes) -> dict | None:
      x_mg_imu, y_mg_imu, z_mg_imu,
      x_gy, y_gy, z_gy,
      velocity) = struct.unpack('>fffffffffffff', data[3:55])
-
+    
     flight_state = data[55]
 
+    # crc_received = (data[56] << 8) | data[57]
+    # if crc16(data[:55]) != crc_received:
+    #     return None
+
     crc_received = (data[56] << 8) | data[57]
-    if crc16(data[:55]) != crc_received:
+    crc_calculated = crc16(data[:55])
+    print(f"CRC received: {crc_received:#06x} | CRC calculated: {crc_calculated:#06x}")
+
+    if crc_received != crc_calculated:
         return None
 
     return {
