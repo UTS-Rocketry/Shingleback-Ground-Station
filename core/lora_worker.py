@@ -16,12 +16,12 @@ class LoRaWorker(QtCore.QThread):
     def init_radio(self):
         try:
             spi = busio.SPI(board.SCLK, MOSI=board.MOSI, MISO=board.MISO)
-            cs = digitalio.DigitalInOut(board.D25)
+            cs  = digitalio.DigitalInOut(board.D25)
             rst = digitalio.DigitalInOut(board.D27)
             self.rfm9x = adafruit_rfm9x.RFM9x(spi, cs, rst, 915.0)
-            self.rfm9x.spreading_factor = 7
-            self.rfm9x.signal_bandwidth = 125000
-            self.rfm9x.coding_rate = 5
+            self.rfm9x.spreading_factor  = 7
+            self.rfm9x.signal_bandwidth  = 125000
+            self.rfm9x.coding_rate       = 5
             return True
         except Exception as e:
             self.error_occurred.emit(f"LoRa init failed: {str(e)}")
@@ -38,6 +38,12 @@ class LoRaWorker(QtCore.QThread):
                     self.data_received.emit(bytes(packet[4:]))
             except Exception as e:
                 self.error_occurred.emit(f"LoRa RX error: {str(e)}")
+
+    def send(self, data: bytes):
+        try:
+            self.rfm9x.send(data)
+        except Exception as e:
+            self.error_occurred.emit(f"LoRa TX error: {str(e)}")
 
     def stop(self):
         self.running = False

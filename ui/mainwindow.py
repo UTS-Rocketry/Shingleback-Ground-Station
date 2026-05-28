@@ -3,15 +3,8 @@ from PyQt5 import QtWidgets, QtCore
 from collections import deque
 import pyqtgraph as pg
 
-#from core.dummy_worker import DummyWorker
-
-#from core.serial_worker import SerialWorker
-from core.parser import parse_line
-from core.parser import parse_telemetry
-
+from core.parser import parse_line, parse_telemetry, parse_continuity, build_command, CMD_ARM, CMD_FIRE, CMD_DISARM
 from core.lora_worker import LoRaWorker
-from core.parser import parse_telemetry
-
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -28,7 +21,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.xl_x = deque([0]*n, maxlen=n)
         self.xl_y = deque([0]*n, maxlen=n)
         self.xl_z = deque([0]*n, maxlen=n)
-        self.vel = deque([0]*n, maxlen=n)
+        self.vel  = deque([0]*n, maxlen=n)
 
         # --- Plots ---
         self.plot_widget = pg.GraphicsLayoutWidget()
@@ -48,7 +41,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.xl_y_curve = xl_plot.plot(pen='g', name="Y")
         self.xl_z_curve = xl_plot.plot(pen='b', name="Z")
         self.plot_widget.nextRow()
-        
+
         vel_plot = self.plot_widget.addPlot(title="Velocity (m/s)")
         self.vel_curve = vel_plot.plot(pen='c')
 
@@ -59,30 +52,31 @@ class MainWindow(QtWidgets.QMainWindow):
         dashboard.setFixedWidth(220)
 
         def make_label(title):
-            # helper — creates a bold section title
             lbl = QtWidgets.QLabel(title)
             lbl.setStyleSheet("font-weight: bold; font-size: 13px; margin-top: 8px;")
             return lbl
 
         def make_value():
-            # helper — creates a value readout label
             lbl = QtWidgets.QLabel("--")
             lbl.setStyleSheet("font-family: Courier; font-size: 13px;")
+            return lbl
+
+        def make_cont_indicator(label):
+            lbl = QtWidgets.QLabel(f"{label}: --")
+            lbl.setStyleSheet("font-family: Courier; font-size: 13px; color: grey;")
             return lbl
 
         # Status
         dash_layout.addWidget(make_label("Status"))
         self.status_val = QtWidgets.QLabel("IDLE")
-        self.status_val.setStyleSheet(
-            "font-size: 14px; font-weight: bold; color: orange;"
-        )
+        self.status_val.setStyleSheet("font-size: 14px; font-weight: bold; color: orange;")
         dash_layout.addWidget(self.status_val)
 
         # Altitude
         dash_layout.addWidget(make_label("Altitude"))
         self.alt_val = make_value()
         dash_layout.addWidget(self.alt_val)
-        
+
         # Velocity
         dash_layout.addWidget(make_label("Velocity (m/s)"))
         self.vel_val = make_value()
@@ -115,7 +109,25 @@ class MainWindow(QtWidgets.QMainWindow):
         dash_layout.addWidget(self.hy_val)
         dash_layout.addWidget(self.hz_val)
 
-        dash_layout.addStretch()  # pushes everything to the top
+        # Continuity
+        dash_layout.addWidget(make_label("Continuity"))
+        self.cont_main   = make_cont_indicator("Main")
+        self.cont_drogue = make_cont_indicator("Drogue")
+        dash_layout.addWidget(self.cont_main)
+        dash_layout.addWidget(self.cont_drogue)
+
+        # Commands
+        dash_layout.addWidget(make_label("Commands"))
+        btn_fire_drogue = QtWidgets.QPushButton("Fire Drogue")
+        btn_fire_main   = QtWidgets.QPushButton("Fire Main")
+        btn_fire_drogue.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
+        btn_fire_main.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
+        btn_fire_drogue.clicked.connect(lambda: self.send_command(CMD_FIRE, 1))
+        btn_fire_main.clicked.connect(lambda:   self.send_command(CMD_FIRE, 2))
+        dash_layout.addWidget(btn_fire_drogue)
+        dash_layout.addWidget(btn_fire_main)
+
+        dash_layout.addStretch()
 
         # --- Terminal ---
         self.terminal = QtWidgets.QTextEdit()
@@ -123,13 +135,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.terminal.setFontFamily("Courier")
 
         # --- Layout ---
-        # Splitter splits plots and terminal vertically
         v_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         v_splitter.addWidget(self.plot_widget)
         v_splitter.addWidget(self.terminal)
         v_splitter.setSizes([550, 150])
 
-        # Horizontal layout — plots+terminal on left, dashboard on right
         h_layout = QtWidgets.QHBoxLayout()
         h_layout.addWidget(v_splitter)
         h_layout.addWidget(dashboard)
@@ -139,59 +149,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
 
         # Worker
-        from core.lora_worker import LoRaWorker
-        from core.parser import parse_telemetry
-
         self.worker = LoRaWorker()
         self.worker.data_received.connect(self.on_lora_data)
         self.worker.error_occurred.connect(lambda e: self.terminal.append(f"[ERROR] {e}"))
         self.worker.start()
 
-    def on_data(self, line):
-        self.terminal.append(line)
+    def send_command(self, cmd_id: int, channel: int):
+        pkt = build_command(cmd_id, channel)
+        self.worker.send(pkt)
+        label = {1: "Drogue", 2: "Main"}.get(channel, f"ch{channel}")
+        self.terminal.append(f"[CMD] FIRE {label}")
         self.terminal.ensureCursorVisible()
 
-        parsed = parse_line(line)
-        if parsed is None:
+    def on_lora_data(self, raw: bytes):
+        if len(raw) < 2:
+            self.terminal.append(f"[BAD PACKET] too short: {raw.hex()}")
             return
 
-        alt, xl_x, xl_y, xl_z, gy_x, gy_y, gy_z, hx, hy, hz = parsed
+        pkt_type = raw[1]
 
-        # Update buffers
-        self.alt.append(alt)
-        self.xl_x.append(xl_x)
-        self.xl_y.append(xl_y)
-        self.xl_z.append(xl_z)
-        self.gy_x.append(gy_x)
-        self.gy_y.append(gy_y)
-        self.gy_z.append(gy_z)
+        if pkt_type == 0x01:
+            self._handle_telemetry(raw)
+        elif pkt_type == 0x02:
+            self._handle_continuity(raw)
+        else:
+            self.terminal.append(f"[UNKNOWN PKT] type={pkt_type:#04x} {raw.hex()}")
+        self.terminal.ensureCursorVisible()
 
-        # Update plots
-        self.alt_curve.setData(list(self.alt))
-        self.gy_x_curve.setData(list(self.gy_x))
-        self.gy_y_curve.setData(list(self.gy_y))
-        self.gy_z_curve.setData(list(self.gy_z))
-        self.xl_x_curve.setData(list(self.xl_x))
-        self.xl_y_curve.setData(list(self.xl_y))
-        self.xl_z_curve.setData(list(self.xl_z))
-
-        # Update dashboard
-        self.alt_val.setText(f"Alt: {alt:.2f} m")
-        self.xl_x_val.setText(f"X: {xl_x:.1f}")
-        self.xl_y_val.setText(f"Y: {xl_y:.1f}")
-        self.xl_z_val.setText(f"Z: {xl_z:.1f}")
-        self.gy_x_val.setText(f"X: {gy_x:.1f}")
-        self.gy_y_val.setText(f"Y: {gy_y:.1f}")
-        self.gy_z_val.setText(f"Z: {gy_z:.1f}")
-        self.hx_val.setText(f"X: {hx:.1f}")
-        self.hy_val.setText(f"Y: {hy:.1f}")
-        self.hz_val.setText(f"Z: {hz:.1f}")
-
-    def on_lora_data(self, raw: bytes):
+    def _handle_telemetry(self, raw: bytes):
         parsed = parse_telemetry(raw)
         if parsed is None:
-            self.terminal.append(f"[BAD PACKET] {raw.hex()}")
-            self.terminal.ensureCursorVisible()
+            self.terminal.append(f"[BAD TELEM] {raw.hex()}")
             return
 
         self.terminal.append(
@@ -205,21 +193,75 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Gyro X:{parsed['imu_gyro']['x']:.1f} Y:{parsed['imu_gyro']['y']:.1f} Z:{parsed['imu_gyro']['z']:.1f} | "
             f"State: {parsed['flight_state']}"
         )
+
+        alt  = parsed['altitude']
+        vel  = parsed['velocity']
+        xl_x, xl_y, xl_z = parsed['accel']['x'],     parsed['accel']['y'],     parsed['accel']['z']
+        gy_x, gy_y, gy_z = parsed['imu_gyro']['x'],  parsed['imu_gyro']['y'],  parsed['imu_gyro']['z']
+        hx,   hy,   hz   = parsed['imu_accel']['x'], parsed['imu_accel']['y'], parsed['imu_accel']['z']
+
+        self.alt.append(alt);  self.vel.append(vel)
+        self.xl_x.append(xl_x); self.xl_y.append(xl_y); self.xl_z.append(xl_z)
+        self.gy_x.append(gy_x); self.gy_y.append(gy_y); self.gy_z.append(gy_z)
+
+        self.alt_curve.setData(list(self.alt))
+        self.vel_curve.setData(list(self.vel))
+        self.gy_x_curve.setData(list(self.gy_x))
+        self.gy_y_curve.setData(list(self.gy_y))
+        self.gy_z_curve.setData(list(self.gy_z))
+        self.xl_x_curve.setData(list(self.xl_x))
+        self.xl_y_curve.setData(list(self.xl_y))
+        self.xl_z_curve.setData(list(self.xl_z))
+
+        self.alt_val.setText(f"Alt: {alt:.2f} m")
+        self.vel_val.setText(f"{vel:.2f} m/s")
+        self.xl_x_val.setText(f"X: {xl_x:.1f}")
+        self.xl_y_val.setText(f"Y: {xl_y:.1f}")
+        self.xl_z_val.setText(f"Z: {xl_z:.1f}")
+        self.gy_x_val.setText(f"X: {gy_x:.1f}")
+        self.gy_y_val.setText(f"Y: {gy_y:.1f}")
+        self.gy_z_val.setText(f"Z: {gy_z:.1f}")
+        self.hx_val.setText(f"X: {hx:.1f}")
+        self.hy_val.setText(f"Y: {hy:.1f}")
+        self.hz_val.setText(f"Z: {hz:.1f}")
+        self.status_val.setText("RX OK")
+        self.status_val.setStyleSheet("font-size: 14px; font-weight: bold; color: green;")
+
+    def _handle_continuity(self, raw: bytes):
+        parsed = parse_continuity(raw)
+        if parsed is None:
+            self.terminal.append(f"[BAD CONT] {raw.hex()}")
+            return
+
+        def fmt(label, ok):
+            return f"{label}: {'OK' if ok else 'OPEN'}"
+
+        def style(ok):
+            return f"font-family: Courier; font-size: 13px; color: {'lime' if ok else 'red'};"
+
+        self.cont_main.setText(fmt("Main", parsed['main']))
+        self.cont_main.setStyleSheet(style(parsed['main']))
+        self.cont_drogue.setText(fmt("Drogue", parsed['drogue']))
+        self.cont_drogue.setStyleSheet(style(parsed['drogue']))
+
+        self.terminal.append(
+            f"[CONT] Main: {'OK' if parsed['main'] else 'OPEN'} | "
+            f"Drogue: {'OK' if parsed['drogue'] else 'OPEN'}"
+        )
+
+    def on_data(self, line):
+        self.terminal.append(line)
         self.terminal.ensureCursorVisible()
-        alt = parsed['altitude']
-        vel = parsed['velocity']
-        xl_x, xl_y, xl_z = parsed['accel']['x'], parsed['accel']['y'], parsed['accel']['z']
-        gy_x, gy_y, gy_z = parsed['imu_gyro']['x'], parsed['imu_gyro']['y'], parsed['imu_gyro']['z']
-        hx, hy, hz = parsed['imu_accel']['x'], parsed['imu_accel']['y'], parsed['imu_accel']['z']
+
+        parsed = parse_line(line)
+        if parsed is None:
+            return
+
+        alt, xl_x, xl_y, xl_z, gy_x, gy_y, gy_z, hx, hy, hz = parsed
 
         self.alt.append(alt)
-        self.xl_x.append(xl_x)
-        self.xl_y.append(xl_y)
-        self.xl_z.append(xl_z)
-        self.gy_x.append(gy_x)
-        self.gy_y.append(gy_y)
-        self.gy_z.append(gy_z)
-        self.vel.append(vel)
+        self.xl_x.append(xl_x); self.xl_y.append(xl_y); self.xl_z.append(xl_z)
+        self.gy_x.append(gy_x); self.gy_y.append(gy_y); self.gy_z.append(gy_z)
 
         self.alt_curve.setData(list(self.alt))
         self.gy_x_curve.setData(list(self.gy_x))
@@ -239,6 +281,3 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hx_val.setText(f"X: {hx:.1f}")
         self.hy_val.setText(f"Y: {hy:.1f}")
         self.hz_val.setText(f"Z: {hz:.1f}")
-        self.vel_val.setText(f"{vel:.2f} m/s")
-        self.status_val.setText("RX OK")
-        self.status_val.setStyleSheet("font-size: 14px; font-weight: bold; color: green;")
