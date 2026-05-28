@@ -1,4 +1,5 @@
 import sys
+import random
 from PyQt5 import QtWidgets, QtCore
 from collections import deque
 import pyqtgraph as pg
@@ -12,6 +13,10 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Shingleback Ground Station")
         self.resize(1400, 800)
+
+        # Arm state
+        self.arm_code = str(random.randint(1000, 9999))
+        self.armed = False
 
         n = 100
         self.alt  = deque([0]*n, maxlen=n)
@@ -61,11 +66,12 @@ class MainWindow(QtWidgets.QMainWindow):
             lbl.setStyleSheet("font-family: Courier; font-size: 13px;")
             return lbl
 
-        def make_cont_indicator(label):
+        def make_cont_btn(label):
             lbl = QtWidgets.QLabel(f"{label}: --")
-            lbl.setStyleSheet("font-family: Courier; font-size: 13px; color: grey;")
+            lbl.setStyleSheet("background-color: grey; color: white; font-weight: bold; padding: 4px;")
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
             return lbl
-
+    
         # Status
         dash_layout.addWidget(make_label("Status"))
         self.status_val = QtWidgets.QLabel("IDLE")
@@ -111,21 +117,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Continuity
         dash_layout.addWidget(make_label("Continuity"))
-        self.cont_main   = make_cont_indicator("Main")
-        self.cont_drogue = make_cont_indicator("Drogue")
+        self.cont_main   = make_cont_btn("Main")
+        self.cont_drogue = make_cont_btn("Drogue")
         dash_layout.addWidget(self.cont_main)
         dash_layout.addWidget(self.cont_drogue)
 
+        # Arm code
+        dash_layout.addWidget(make_label("Arm Code"))
+        self.arm_code_display = QtWidgets.QLabel(self.arm_code)
+        self.arm_code_display.setStyleSheet(
+            "font-family: Courier; font-size: 22px; font-weight: bold; color: red;"
+        )
+        dash_layout.addWidget(self.arm_code_display)
+
+        self.arm_input = QtWidgets.QLineEdit()
+        self.arm_input.setPlaceholderText("Enter code to arm")
+        self.arm_input.setMaxLength(4)
+        dash_layout.addWidget(self.arm_input)
+
+        self.arm_btn = QtWidgets.QPushButton("ARM")
+        self.arm_btn.setStyleSheet("background-color: orange; font-weight: bold;")
+        self.arm_btn.clicked.connect(self.try_arm)
+        dash_layout.addWidget(self.arm_btn)
+
         # Commands
         dash_layout.addWidget(make_label("Commands"))
-        btn_fire_drogue = QtWidgets.QPushButton("Fire Drogue")
-        btn_fire_main   = QtWidgets.QPushButton("Fire Main")
-        btn_fire_drogue.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
-        btn_fire_main.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
-        btn_fire_drogue.clicked.connect(lambda: self.send_command(CMD_FIRE, 1))
-        btn_fire_main.clicked.connect(lambda:   self.send_command(CMD_FIRE, 2))
-        dash_layout.addWidget(btn_fire_drogue)
-        dash_layout.addWidget(btn_fire_main)
+        self.btn_fire_drogue = QtWidgets.QPushButton("Fire Drogue")
+        self.btn_fire_main   = QtWidgets.QPushButton("Fire Main")
+        self.btn_fire_drogue.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
+        self.btn_fire_main.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
+        self.btn_fire_drogue.setEnabled(False)
+        self.btn_fire_main.setEnabled(False)
+        self.btn_fire_drogue.clicked.connect(lambda: self.send_command(CMD_FIRE, 1))
+        self.btn_fire_main.clicked.connect(lambda: self.send_command(CMD_FIRE, 2))
+        dash_layout.addWidget(self.btn_fire_drogue)
+        dash_layout.addWidget(self.btn_fire_main)
 
         dash_layout.addStretch()
 
@@ -154,6 +180,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.error_occurred.connect(lambda e: self.terminal.append(f"[ERROR] {e}"))
         self.worker.start()
 
+    def try_arm(self):
+        if self.arm_input.text() == self.arm_code:
+            self.armed = True
+            self.btn_fire_drogue.setEnabled(True)
+            self.btn_fire_main.setEnabled(True)
+            self.arm_btn.setEnabled(False)
+            self.arm_input.setEnabled(False)
+            self.arm_code_display.setText("ARMED")
+            self.arm_code_display.setStyleSheet(
+                "font-size: 18px; font-weight: bold; color: lime;"
+            )
+            self.terminal.append("[SYS] SYSTEM ARMED")
+            self.terminal.ensureCursorVisible()
+        else:
+            self.arm_input.clear()
+            self.arm_input.setPlaceholderText("Wrong code!")
+            self.arm_input.setStyleSheet("border: 2px solid red;")
+            self.terminal.append("[SYS] ARM FAILED - wrong code")
+            self.terminal.ensureCursorVisible()
+
     def send_command(self, cmd_id: int, channel: int):
         pkt = build_command(cmd_id, channel)
         self.worker.send(pkt)
@@ -165,6 +211,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(raw) < 2:
             self.terminal.append(f"[BAD PACKET] too short: {raw.hex()}")
             return
+        
+        self.terminal.append(f"[RAW] type={raw[1]:#04x} len={len(raw)}") 
 
         pkt_type = raw[1]
 
@@ -233,16 +281,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.terminal.append(f"[BAD CONT] {raw.hex()}")
             return
 
-        def fmt(label, ok):
-            return f"{label}: {'OK' if ok else 'OPEN'}"
-
-        def style(ok):
-            return f"font-family: Courier; font-size: 13px; color: {'lime' if ok else 'red'};"
-
-        self.cont_main.setText(fmt("Main", parsed['main']))
-        self.cont_main.setStyleSheet(style(parsed['main']))
-        self.cont_drogue.setText(fmt("Drogue", parsed['drogue']))
-        self.cont_drogue.setStyleSheet(style(parsed['drogue']))
+        def update_btn(btn, label, ok):
+            btn.setText(f"{label}: {'OK' if ok else 'OPEN'}")
+            color = "lime" if ok else "red"
+            btn.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
+            btn.repaint()
+        update_btn(self.cont_main,   "Main",   parsed['main'])
+        update_btn(self.cont_drogue, "Drogue", parsed['drogue'])
 
         self.terminal.append(
             f"[CONT] Main: {'OK' if parsed['main'] else 'OPEN'} | "
