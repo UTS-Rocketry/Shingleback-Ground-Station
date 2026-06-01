@@ -202,10 +202,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def send_command(self, cmd_id: int, channel: int):
         pkt = build_command(cmd_id, channel)
-        self.worker.send(pkt)
+        # self.worker.send(pkt)
         label = {1: "Drogue", 2: "Main"}.get(channel, f"ch{channel}")
         self.terminal.append(f"[CMD] FIRE {label}")
         self.terminal.ensureCursorVisible()
+        for _ in range(10):
+            self.worker.send(pkt)
 
     def on_lora_data(self, raw: bytes):
         if len(raw) < 2:
