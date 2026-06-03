@@ -4,11 +4,23 @@ from PyQt5 import QtWidgets, QtCore
 from collections import deque
 import pyqtgraph as pg
 
-from core.parser import parse_line, parse_telemetry, parse_continuity, build_command, CMD_ARM, CMD_FIRE, CMD_DISARM
+from core.parser import parse_telemetry, parse_continuity, build_command, CMD_FIRE
 from core.lora_worker import LoRaWorker
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    FLIGHT_STATES = {
+        0: ("IDLE", "grey", "white"),
+        1: ("PAD", "orange", "black"),
+        2: ("POWERED ASCENT", "yellow", "black"),
+        3: ("COASTING", "cyan", "black"),
+        4: ("APOGEE", "magenta", "white"),
+        5: ("DROGUE DESCENT", "deepskyblue", "black"),
+        6: ("MAIN DESCENT", "lime", "black"),
+        7: ("LANDED", "white", "black"),
+        8: ("FAULT", "red", "white"),
+    }
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Shingleback Ground Station")
@@ -17,6 +29,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Arm state
         self.arm_code = str(random.randint(1000, 9999))
         self.armed = False
+        self.flight_state = 0
 
         n = 100
         self.alt  = deque([0]*n, maxlen=n)
@@ -35,7 +48,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.alt_curve = alt_plot.plot(pen='y')
         self.plot_widget.nextRow()
 
-        gy_plot = self.plot_widget.addPlot(title="Gyro (mdps)")
+        gy_plot = self.plot_widget.addPlot(title="Gyro (dps)")
         self.gy_x_curve = gy_plot.plot(pen='r', name="X")
         self.gy_y_curve = gy_plot.plot(pen='g', name="Y")
         self.gy_z_curve = gy_plot.plot(pen='b', name="Z")
@@ -72,11 +85,14 @@ class MainWindow(QtWidgets.QMainWindow):
             lbl.setAlignment(QtCore.Qt.AlignCenter)
             return lbl
     
-        # Status
-        dash_layout.addWidget(make_label("Status"))
-        self.status_val = QtWidgets.QLabel("IDLE")
-        self.status_val.setStyleSheet("font-size: 14px; font-weight: bold; color: orange;")
-        dash_layout.addWidget(self.status_val)
+        # Flight state
+        dash_layout.addWidget(make_label("Flight State"))
+        self.flight_state_val = QtWidgets.QLabel()
+        self.flight_state_val.setAlignment(QtCore.Qt.AlignCenter)
+        self.flight_state_val.setWordWrap(True)
+        self.flight_state_val.setMinimumHeight(72)
+        dash_layout.addWidget(self.flight_state_val)
+        self.update_flight_state_indicator()
 
         # Altitude
         dash_layout.addWidget(make_label("Altitude"))
@@ -98,7 +114,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dash_layout.addWidget(self.xl_z_val)
 
         # Gyro
-        dash_layout.addWidget(make_label("Gyro (mdps)"))
+        dash_layout.addWidget(make_label("Gyro (dps)"))
         self.gy_x_val = make_value()
         self.gy_y_val = make_value()
         self.gy_z_val = make_value()
@@ -139,6 +155,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_btn.setStyleSheet("background-color: orange; font-weight: bold;")
         self.arm_btn.clicked.connect(self.try_arm)
         dash_layout.addWidget(self.arm_btn)
+
+        self.disarm_btn = QtWidgets.QPushButton("DISARM")
+        self.disarm_btn.setStyleSheet("background-color: #555; color: white; font-weight: bold;")
+        self.disarm_btn.setEnabled(False)
+        self.disarm_btn.clicked.connect(self.do_disarm)
+        dash_layout.addWidget(self.disarm_btn)
 
         # Commands
         dash_layout.addWidget(make_label("Commands"))
@@ -185,6 +207,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.armed = True
             self.btn_fire_drogue.setEnabled(True)
             self.btn_fire_main.setEnabled(True)
+            self.disarm_btn.setEnabled(True)
             self.arm_btn.setEnabled(False)
             self.arm_input.setEnabled(False)
             self.arm_code_display.setText("ARMED")
@@ -200,14 +223,51 @@ class MainWindow(QtWidgets.QMainWindow):
             self.terminal.append("[SYS] ARM FAILED - wrong code")
             self.terminal.ensureCursorVisible()
 
+    def update_flight_state_indicator(self):
+        name, bg_color, fg_color = self.FLIGHT_STATES.get(
+            self.flight_state,
+            (f"UNKNOWN {self.flight_state}", "red", "white"),
+        )
+        self.flight_state_val.setText(name)
+        self.flight_state_val.setStyleSheet(
+            "font-size: 22px; font-weight: bold; padding: 12px 6px; "
+            f"background-color: {bg_color}; color: {fg_color}; border-radius: 4px;"
+        )
+
+    def do_disarm(self):
+        self.armed = False
+        self.btn_fire_drogue.setEnabled(False)
+        self.btn_fire_main.setEnabled(False)
+        self.disarm_btn.setEnabled(False)
+        self.arm_btn.setEnabled(True)
+        self.arm_input.setEnabled(True)
+        self.arm_input.clear()
+        self.arm_input.setPlaceholderText("Enter code to arm")
+        self.arm_input.setStyleSheet("")
+        self.arm_code = str(random.randint(1000, 9999))
+        self.arm_code_display.setText(self.arm_code)
+        self.arm_code_display.setStyleSheet(
+            "font-family: Courier; font-size: 22px; font-weight: bold; color: red;"
+        )
+        self.terminal.append("[SYS] DISARMED")
+        self.terminal.ensureCursorVisible()
+
     def send_command(self, cmd_id: int, channel: int):
+        if self.flight_state > 1:
+            state_name = self.FLIGHT_STATES.get(
+                self.flight_state,
+                (f"UNKNOWN {self.flight_state}", "", ""),
+            )[0]
+            self.terminal.append(f"[CMD BLOCKED] Flight state {state_name}; command not sent")
+            self.terminal.ensureCursorVisible()
+            return
+
         pkt = build_command(cmd_id, channel)
-        # self.worker.send(pkt)
         label = {1: "Drogue", 2: "Main"}.get(channel, f"ch{channel}")
         self.terminal.append(f"[CMD] FIRE {label}")
         self.terminal.ensureCursorVisible()
-        for _ in range(10):
-            self.worker.send(pkt)
+        self.worker.send(pkt)
+        self.do_disarm()
 
     def on_lora_data(self, raw: bytes):
         if len(raw) < 2:
@@ -238,7 +298,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Vel: {parsed['velocity']:.2f}m/s | "
             f"P: {parsed['pressure']:.1f}Pa | "
             f"T: {parsed['temperature']:.1f}C | "
-            f"Accel X:{parsed['accel']['x']:.1f} Y:{parsed['accel']['y']:.1f} Z:{parsed['accel']['z']:.1f} | "
+            f"H3LIS X:{parsed['h3lis']['x']:.1f} Y:{parsed['h3lis']['y']:.1f} Z:{parsed['h3lis']['z']:.1f} | "
             f"IMU X:{parsed['imu_accel']['x']:.1f} Y:{parsed['imu_accel']['y']:.1f} Z:{parsed['imu_accel']['z']:.1f} | "
             f"Gyro X:{parsed['imu_gyro']['x']:.1f} Y:{parsed['imu_gyro']['y']:.1f} Z:{parsed['imu_gyro']['z']:.1f} | "
             f"State: {parsed['flight_state']}"
@@ -246,9 +306,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         alt  = parsed['altitude']
         vel  = parsed['velocity']
-        xl_x, xl_y, xl_z = parsed['accel']['x'],     parsed['accel']['y'],     parsed['accel']['z']
+        xl_x, xl_y, xl_z = parsed['imu_accel']['x'], parsed['imu_accel']['y'], parsed['imu_accel']['z']
         gy_x, gy_y, gy_z = parsed['imu_gyro']['x'],  parsed['imu_gyro']['y'],  parsed['imu_gyro']['z']
-        hx,   hy,   hz   = parsed['imu_accel']['x'], parsed['imu_accel']['y'], parsed['imu_accel']['z']
+        hx,   hy,   hz   = parsed['h3lis']['x'],     parsed['h3lis']['y'],     parsed['h3lis']['z']
+        self.flight_state = parsed['flight_state']
+        self.update_flight_state_indicator()
 
         self.alt.append(alt);  self.vel.append(vel)
         self.xl_x.append(xl_x); self.xl_y.append(xl_y); self.xl_z.append(xl_z)
@@ -274,8 +336,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hx_val.setText(f"X: {hx:.1f}")
         self.hy_val.setText(f"Y: {hy:.1f}")
         self.hz_val.setText(f"Z: {hz:.1f}")
-        self.status_val.setText("RX OK")
-        self.status_val.setStyleSheet("font-size: 14px; font-weight: bold; color: green;")
 
     def _handle_continuity(self, raw: bytes):
         parsed = parse_continuity(raw)
@@ -295,36 +355,3 @@ class MainWindow(QtWidgets.QMainWindow):
             f"[CONT] Main: {'OK' if parsed['main'] else 'OPEN'} | "
             f"Drogue: {'OK' if parsed['drogue'] else 'OPEN'}"
         )
-
-    def on_data(self, line):
-        self.terminal.append(line)
-        self.terminal.ensureCursorVisible()
-
-        parsed = parse_line(line)
-        if parsed is None:
-            return
-
-        alt, xl_x, xl_y, xl_z, gy_x, gy_y, gy_z, hx, hy, hz = parsed
-
-        self.alt.append(alt)
-        self.xl_x.append(xl_x); self.xl_y.append(xl_y); self.xl_z.append(xl_z)
-        self.gy_x.append(gy_x); self.gy_y.append(gy_y); self.gy_z.append(gy_z)
-
-        self.alt_curve.setData(list(self.alt))
-        self.gy_x_curve.setData(list(self.gy_x))
-        self.gy_y_curve.setData(list(self.gy_y))
-        self.gy_z_curve.setData(list(self.gy_z))
-        self.xl_x_curve.setData(list(self.xl_x))
-        self.xl_y_curve.setData(list(self.xl_y))
-        self.xl_z_curve.setData(list(self.xl_z))
-
-        self.alt_val.setText(f"Alt: {alt:.2f} m")
-        self.xl_x_val.setText(f"X: {xl_x:.1f}")
-        self.xl_y_val.setText(f"Y: {xl_y:.1f}")
-        self.xl_z_val.setText(f"Z: {xl_z:.1f}")
-        self.gy_x_val.setText(f"X: {gy_x:.1f}")
-        self.gy_y_val.setText(f"Y: {gy_y:.1f}")
-        self.gy_z_val.setText(f"Z: {gy_z:.1f}")
-        self.hx_val.setText(f"X: {hx:.1f}")
-        self.hy_val.setText(f"Y: {hy:.1f}")
-        self.hz_val.setText(f"Z: {hz:.1f}")

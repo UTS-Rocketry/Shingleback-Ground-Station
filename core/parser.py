@@ -68,6 +68,9 @@ def parse_telemetry(data: bytes) -> dict | None:
      x_mg_imu, y_mg_imu, z_mg_imu,
      x_gy, y_gy, z_gy,
      velocity) = struct.unpack('>fffffffffffff', data[3:55])
+    x_gy /= 1000.0
+    y_gy /= 1000.0
+    z_gy /= 1000.0
 
     flight_state = data[55]
 
@@ -84,7 +87,7 @@ def parse_telemetry(data: bytes) -> dict | None:
         'pressure': pressure,
         'temperature': temperature,
         'velocity': velocity,
-        'accel':     {'x': x_mg,     'y': y_mg,     'z': z_mg},
+        'h3lis':     {'x': x_mg,     'y': y_mg,     'z': z_mg},
         'imu_accel': {'x': x_mg_imu, 'y': y_mg_imu, 'z': z_mg_imu},
         'imu_gyro':  {'x': x_gy,     'y': y_gy,     'z': z_gy},
         'flight_state': flight_state,
