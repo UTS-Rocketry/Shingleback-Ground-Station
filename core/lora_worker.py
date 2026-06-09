@@ -6,7 +6,7 @@ import adafruit_rfm9x
 from PyQt5 import QtCore
 
 class LoRaWorker(QtCore.QThread):
-    RX_TIMEOUT_SECONDS = 0.1
+    RX_TIMEOUT_SECONDS = 0.02
     PAYLOAD_SYNC_WORD = 0xAA
     RADIOHEAD_HEADER = (0xFF, 0xFF, 0x00, 0x00)
     RADIOHEAD_HEADER_LENGTH = 4

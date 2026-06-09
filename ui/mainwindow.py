@@ -16,24 +16,21 @@ from core.lora_worker import LoRaWorker
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    COMMAND_REPEATS = 10
-    COMMAND_REPEAT_MS = 100
-    ARM_RETRY_MS = 100
-    ARM_LOG_EVERY_PACKETS = 10
+    COMMAND_REPEATS = 5
     ARM_CONFIRM_TIMEOUT_MS = 15000
     STATE_IDLE = 0
-    STATE_PAD = 1
+    STATE_ARMED = 1
 
     FLIGHT_STATES = {
         0: ("IDLE", "grey", "white"),
-        1: ("PAD", "orange", "black"),
+        1: ("ARMED", "orange", "black"),
         2: ("POWERED ASCENT", "yellow", "black"),
         3: ("COASTING", "cyan", "black"),
         4: ("APOGEE", "magenta", "white"),
-        5: ("DROGUE DESCENT", "deepskyblue", "black"),
-        6: ("MAIN DESCENT", "lime", "black"),
-        7: ("LANDED", "white", "black"),
-        8: ("FAULT", "red", "white"),
+        5: ("DESCENT", "deepskyblue", "black"),
+        6: ("LANDED", "lime", "black"),
+        7: ("FAULT", "red", "white"),
+        8: ("BENCHTEST", "white", "black"),
     }
 
     def __init__(self):
@@ -45,7 +42,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code = str(random.randint(1000, 9999))
         self.armed = False
         self.pending_arm = False
-        self.arm_packets_sent = 0
+        self.pending_command = None
         self.flight_state = 0
 
         n = 100
@@ -218,10 +215,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.data_received.connect(self.on_lora_data)
         self.worker.error_occurred.connect(lambda e: self.terminal.append(f"[ERROR] {e}"))
 
-        self.arm_retry_timer = QtCore.QTimer(self)
-        self.arm_retry_timer.setInterval(self.ARM_RETRY_MS)
-        self.arm_retry_timer.timeout.connect(self.send_arm_request)
-
         self.arm_timeout_timer = QtCore.QTimer(self)
         self.arm_timeout_timer.setSingleShot(True)
         self.arm_timeout_timer.timeout.connect(self.handle_arm_timeout)
@@ -240,7 +233,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def begin_arm_request(self):
         self.pending_arm = True
         self.armed = False
-        self.arm_packets_sent = 0
         self.btn_fire_drogue.setEnabled(False)
         self.btn_fire_main.setEnabled(False)
         self.disarm_btn.setEnabled(True)
@@ -250,43 +242,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code_display.setStyleSheet(
             "font-size: 18px; font-weight: bold; color: orange;"
         )
-        self.terminal.append(
-            f"[SYS] ARM REQUEST SENT - sending every {self.ARM_RETRY_MS} ms until PAD telemetry"
-        )
+        self.terminal.append("[SYS] ARM REQUEST QUEUED - waiting for next telemetry")
         self.terminal.ensureCursorVisible()
 
         self.send_arm_request()
-        self.arm_retry_timer.start()
         self.arm_timeout_timer.start(self.ARM_CONFIRM_TIMEOUT_MS)
 
-        if self.flight_state == self.STATE_PAD:
+        if self.flight_state == self.STATE_ARMED:
             self.confirm_arm()
 
     def send_arm_request(self):
         if not self.pending_arm:
             return
-        if self.flight_state == self.STATE_PAD:
+        if self.flight_state == self.STATE_ARMED:
             self.confirm_arm()
             return
-        pkt = self.queue_single_command(CMD_ARM, 0)
-        self.arm_packets_sent += 1
-
-        if (
-            self.arm_packets_sent == 1
-            or self.arm_packets_sent % self.ARM_LOG_EVERY_PACKETS == 0
-        ):
-            self.terminal.append(
-                f"[CMD] ARM sent={self.arm_packets_sent} "
-                f"(payload={len(pkt)}B, air={self.air_packet_length(pkt)}B)"
-            )
-            self.terminal.ensureCursorVisible()
+        self.queue_command(
+            CMD_ARM,
+            0,
+            "ARM",
+            should_send=lambda: self.pending_arm and self.flight_state != self.STATE_ARMED,
+        )
 
     def confirm_arm(self):
         if not self.pending_arm:
             return
 
         self.pending_arm = False
-        self.arm_retry_timer.stop()
+        self.clear_pending_command("ARM")
         self.arm_timeout_timer.stop()
         self.armed = True
         self.btn_fire_drogue.setEnabled(True)
@@ -298,7 +281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code_display.setStyleSheet(
             "font-size: 18px; font-weight: bold; color: lime;"
         )
-        self.terminal.append("[SYS] ARM CONFIRMED - flight computer reported PAD")
+        self.terminal.append("[SYS] ARM CONFIRMED - flight computer reported ARMED")
         self.terminal.ensureCursorVisible()
 
     def handle_arm_timeout(self):
@@ -306,7 +289,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.pending_arm = False
-        self.arm_retry_timer.stop()
+        self.clear_pending_command("ARM")
         self.armed = False
         self.btn_fire_drogue.setEnabled(False)
         self.btn_fire_main.setEnabled(False)
@@ -320,36 +303,61 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code_display.setStyleSheet(
             "font-family: Courier; font-size: 22px; font-weight: bold; color: red;"
         )
-        self.terminal.append("[SYS] ARM TIMEOUT - PAD telemetry not received")
+        self.terminal.append("[SYS] ARM TIMEOUT - ARMED telemetry not received")
         self.terminal.ensureCursorVisible()
 
     def air_packet_length(self, packet: bytes) -> int:
         return len(packet) + LoRaWorker.RADIOHEAD_HEADER_LENGTH
 
-    def queue_single_command(self, cmd_id: int, channel: int) -> bytes:
-        pkt = build_command(cmd_id, channel)
-        self.worker.send(pkt)
-        return pkt
+    def clear_pending_command(self, label: str | None = None):
+        if self.pending_command is None:
+            return
+        if label is None or self.pending_command["label"] == label:
+            self.pending_command = None
 
-    def send_queued_packet(self, packet: bytes, should_send=None):
-        if should_send is None or should_send():
-            self.worker.send(packet)
+    def queue_command(
+        self,
+        cmd_id: int,
+        channel: int,
+        label: str,
+        repeats: int | None = None,
+        should_send=None,
+    ):
+        if repeats is None:
+            repeats = self.COMMAND_REPEATS
 
-    def queue_command(self, cmd_id: int, channel: int, label: str, should_send=None):
         pkt = build_command(cmd_id, channel)
+        self.pending_command = {
+            "packet": pkt,
+            "label": label,
+            "sent": 0,
+            "repeats": repeats,
+            "should_send": should_send,
+        }
         self.terminal.append(
-            f"[CMD] {label} ({self.COMMAND_REPEATS} packets, payload={len(pkt)}B, air={self.air_packet_length(pkt)}B)"
+            f"[CMD QUEUED] {label} ({repeats} telemetry-synced packets, payload={len(pkt)}B, air={self.air_packet_length(pkt)}B)"
         )
         self.terminal.ensureCursorVisible()
-        self.send_queued_packet(pkt, should_send)
-        for repeat in range(1, self.COMMAND_REPEATS):
-            QtCore.QTimer.singleShot(
-                repeat * self.COMMAND_REPEAT_MS,
-                lambda packet=pkt, predicate=should_send: self.send_queued_packet(
-                    packet,
-                    predicate,
-                ),
-            )
+
+    def send_pending_command_after_telemetry(self):
+        if self.pending_command is None:
+            return
+
+        command = self.pending_command
+        should_send = command["should_send"]
+        if should_send is not None and not should_send():
+            self.pending_command = None
+            return
+
+        self.worker.send(command["packet"])
+        command["sent"] += 1
+        self.terminal.append(
+            f"[CMD TX] {command['label']} {command['sent']}/{command['repeats']}"
+        )
+        self.terminal.ensureCursorVisible()
+
+        if command["sent"] >= command["repeats"]:
+            self.pending_command = None
 
     def update_flight_state_indicator(self):
         name, bg_color, fg_color = self.FLIGHT_STATES.get(
@@ -364,7 +372,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def do_disarm(self, *, send_remote: bool = True):
         self.pending_arm = False
-        self.arm_retry_timer.stop()
+        self.clear_pending_command("ARM")
         self.arm_timeout_timer.stop()
 
         if send_remote:
@@ -393,17 +401,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.terminal.ensureCursorVisible()
             return
 
-        if self.flight_state != self.STATE_PAD:
+        if self.flight_state != self.STATE_ARMED:
             state_name = self.FLIGHT_STATES.get(
                 self.flight_state,
                 (f"UNKNOWN {self.flight_state}", "", ""),
             )[0]
-            self.terminal.append(f"[CMD BLOCKED] Flight state {state_name}; expected PAD")
+            self.terminal.append(f"[CMD BLOCKED] Flight state {state_name}; expected ARMED")
             self.terminal.ensureCursorVisible()
             return
 
         label = {1: "Drogue", 2: "Main"}.get(channel, f"ch{channel}")
-        self.queue_command(cmd_id, channel, f"FIRE {label}")
+        self.queue_command(
+            cmd_id,
+            channel,
+            f"FIRE {label}",
+            should_send=lambda: self.flight_state == self.STATE_ARMED,
+        )
         self.do_disarm(send_remote=False)
 
     def on_lora_data(self, raw: bytes):
@@ -429,6 +442,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.terminal.append(f"[BAD TELEM] {raw.hex()}")
             return
 
+        self.flight_state = parsed['flight_state']
+        self.update_flight_state_indicator()
+        if self.pending_arm and self.flight_state == self.STATE_ARMED:
+            self.confirm_arm()
+        if self.armed:
+            fire_enabled = self.flight_state == self.STATE_ARMED
+            self.btn_fire_drogue.setEnabled(fire_enabled)
+            self.btn_fire_main.setEnabled(fire_enabled)
+        self.send_pending_command_after_telemetry()
+
         self.terminal.append(
             f"[{parsed['sequence']:03d}] "
             f"Alt: {parsed['altitude']:.2f}m | "
@@ -446,14 +469,6 @@ class MainWindow(QtWidgets.QMainWindow):
         xl_x, xl_y, xl_z = parsed['imu_accel']['x'], parsed['imu_accel']['y'], parsed['imu_accel']['z']
         gy_x, gy_y, gy_z = parsed['imu_gyro']['x'],  parsed['imu_gyro']['y'],  parsed['imu_gyro']['z']
         hx,   hy,   hz   = parsed['h3lis']['x'],     parsed['h3lis']['y'],     parsed['h3lis']['z']
-        self.flight_state = parsed['flight_state']
-        self.update_flight_state_indicator()
-        if self.pending_arm and self.flight_state == self.STATE_PAD:
-            self.confirm_arm()
-        if self.armed:
-            fire_enabled = self.flight_state == self.STATE_PAD
-            self.btn_fire_drogue.setEnabled(fire_enabled)
-            self.btn_fire_main.setEnabled(fire_enabled)
 
         self.alt.append(alt);  self.vel.append(vel)
         self.xl_x.append(xl_x); self.xl_y.append(xl_y); self.xl_z.append(xl_z)
