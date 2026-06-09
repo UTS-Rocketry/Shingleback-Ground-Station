@@ -18,7 +18,8 @@ from core.lora_worker import LoRaWorker
 class MainWindow(QtWidgets.QMainWindow):
     COMMAND_REPEATS = 10
     COMMAND_REPEAT_MS = 100
-    ARM_RETRY_MS = 1500
+    ARM_RETRY_MS = 100
+    ARM_LOG_EVERY_PACKETS = 10
     ARM_CONFIRM_TIMEOUT_MS = 15000
     STATE_IDLE = 0
     STATE_PAD = 1
@@ -44,6 +45,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code = str(random.randint(1000, 9999))
         self.armed = False
         self.pending_arm = False
+        self.arm_packets_sent = 0
         self.flight_state = 0
 
         n = 100
@@ -238,6 +240,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def begin_arm_request(self):
         self.pending_arm = True
         self.armed = False
+        self.arm_packets_sent = 0
         self.btn_fire_drogue.setEnabled(False)
         self.btn_fire_main.setEnabled(False)
         self.disarm_btn.setEnabled(True)
@@ -247,7 +250,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code_display.setStyleSheet(
             "font-size: 18px; font-weight: bold; color: orange;"
         )
-        self.terminal.append("[SYS] ARM REQUEST SENT - waiting for PAD telemetry")
+        self.terminal.append(
+            f"[SYS] ARM REQUEST SENT - sending every {self.ARM_RETRY_MS} ms until PAD telemetry"
+        )
         self.terminal.ensureCursorVisible()
 
         self.send_arm_request()
@@ -263,12 +268,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.flight_state == self.STATE_PAD:
             self.confirm_arm()
             return
-        self.queue_command(
-            CMD_ARM,
-            0,
-            "ARM",
-            should_send=lambda: self.pending_arm,
-        )
+        pkt = self.queue_single_command(CMD_ARM, 0)
+        self.arm_packets_sent += 1
+
+        if (
+            self.arm_packets_sent == 1
+            or self.arm_packets_sent % self.ARM_LOG_EVERY_PACKETS == 0
+        ):
+            self.terminal.append(
+                f"[CMD] ARM sent={self.arm_packets_sent} "
+                f"(payload={len(pkt)}B, air={self.air_packet_length(pkt)}B)"
+            )
+            self.terminal.ensureCursorVisible()
 
     def confirm_arm(self):
         if not self.pending_arm:
@@ -312,15 +323,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.terminal.append("[SYS] ARM TIMEOUT - PAD telemetry not received")
         self.terminal.ensureCursorVisible()
 
+    def air_packet_length(self, packet: bytes) -> int:
+        return len(packet) + LoRaWorker.RADIOHEAD_HEADER_LENGTH
+
+    def queue_single_command(self, cmd_id: int, channel: int) -> bytes:
+        pkt = build_command(cmd_id, channel)
+        self.worker.send(pkt)
+        return pkt
+
     def send_queued_packet(self, packet: bytes, should_send=None):
         if should_send is None or should_send():
             self.worker.send(packet)
 
     def queue_command(self, cmd_id: int, channel: int, label: str, should_send=None):
         pkt = build_command(cmd_id, channel)
-        air_len = len(pkt) + LoRaWorker.RADIOHEAD_HEADER_LENGTH
         self.terminal.append(
-            f"[CMD] {label} ({self.COMMAND_REPEATS} packets, payload={len(pkt)}B, air={air_len}B)"
+            f"[CMD] {label} ({self.COMMAND_REPEATS} packets, payload={len(pkt)}B, air={self.air_packet_length(pkt)}B)"
         )
         self.terminal.ensureCursorVisible()
         self.send_queued_packet(pkt, should_send)
