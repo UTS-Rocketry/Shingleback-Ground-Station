@@ -48,6 +48,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.armed = False
         self.pending_arm = False
         self.pending_disarm = False
+        self.arm_burst_sent = False
+        self.disarm_burst_sent = False
+        self.fire_code = None
         self.disarm_requested_at = 0.0
         self.last_telemetry_at = 0.0
         self.last_continuity_at = 0.0
@@ -186,6 +189,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Commands
         dash_layout.addWidget(make_label("Commands"))
+        self.fire_code_display = QtWidgets.QLabel("Fire Code: --")
+        self.fire_code_display.setStyleSheet(
+            "font-family: Courier; font-size: 13px; font-weight: bold; color: red;"
+        )
+        dash_layout.addWidget(self.fire_code_display)
+
+        self.fire_input = QtWidgets.QLineEdit()
+        self.fire_input.setPlaceholderText("Enter code to fire")
+        self.fire_input.setMaxLength(4)
+        self.fire_input.setEnabled(False)
+        dash_layout.addWidget(self.fire_input)
+
         self.btn_fire_drogue = QtWidgets.QPushButton("Fire Drogue")
         self.btn_fire_main   = QtWidgets.QPushButton("Fire Main")
         self.btn_fire_drogue.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
@@ -230,6 +245,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.disarm_confirm_timer = QtCore.QTimer(self)
         self.disarm_confirm_timer.setInterval(self.DISARM_CONFIRM_POLL_MS)
         self.disarm_confirm_timer.timeout.connect(self.check_disarm_confirmation)
+
+        self.disarm_timeout_timer = QtCore.QTimer(self)
+        self.disarm_timeout_timer.setSingleShot(True)
+        self.disarm_timeout_timer.timeout.connect(self.handle_disarm_timeout)
         self.worker.start()
 
     def try_arm(self):
@@ -246,7 +265,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pending_arm = True
         self.armed = False
         self.pending_disarm = False
+        self.arm_burst_sent = False
+        self.disarm_burst_sent = False
         self.disarm_confirm_timer.stop()
+        self.disarm_timeout_timer.stop()
+        self.reset_fire_code()
         self.update_command_buttons()
         self.arm_btn.setEnabled(False)
         self.arm_input.setEnabled(False)
@@ -254,10 +277,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code_display.setStyleSheet(
             "font-size: 18px; font-weight: bold; color: orange;"
         )
-        self.terminal.append("[SYS] ARM REQUEST SENT - waiting for ARMED telemetry")
+        self.terminal.append("[SYS] ARM REQUEST QUEUED - waiting for continuity packet")
         self.terminal.ensureCursorVisible()
 
-        self.send_arm_request()
         self.arm_timeout_timer.start(self.ARM_CONFIRM_TIMEOUT_MS)
 
         if self.flight_state == self.STATE_ARMED:
@@ -269,6 +291,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.flight_state == self.STATE_ARMED:
             self.confirm_arm()
             return
+        self.arm_burst_sent = True
+        self.terminal.append("[SYS] CONTINUITY RECEIVED - sending ARM burst")
+        self.terminal.ensureCursorVisible()
         self.queue_command(
             CMD_ARM,
             0,
@@ -281,10 +306,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.pending_arm = False
+        self.arm_burst_sent = False
         self.arm_timeout_timer.stop()
         self.armed = True
         self.pending_disarm = False
         self.disarm_confirm_timer.stop()
+        self.disarm_timeout_timer.stop()
+        self.generate_fire_code()
         self.update_command_buttons()
         self.arm_btn.setEnabled(False)
         self.arm_input.setEnabled(False)
@@ -300,7 +328,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.pending_arm = False
+        arm_was_sent = self.arm_burst_sent
         self.armed = False
+        self.arm_burst_sent = False
+        self.reset_fire_code()
         self.update_command_buttons()
         self.arm_btn.setEnabled(True)
         self.arm_input.setEnabled(True)
@@ -311,7 +342,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code_display.setStyleSheet(
             "font-family: Courier; font-size: 22px; font-weight: bold; color: red;"
         )
-        self.terminal.append("[SYS] ARM TIMEOUT - ARMED telemetry not received")
+        if arm_was_sent:
+            self.terminal.append("[SYS] ARM TIMEOUT - ARMED telemetry not received")
+        else:
+            self.terminal.append("[SYS] ARM TIMEOUT - no continuity packet received")
         self.terminal.ensureCursorVisible()
 
     def air_packet_length(self, packet: bytes) -> int:
@@ -371,7 +405,42 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.btn_fire_drogue.setEnabled(fire_enabled)
         self.btn_fire_main.setEnabled(fire_enabled)
+        self.fire_input.setEnabled(fire_enabled)
         self.disarm_btn.setEnabled(disarm_enabled)
+
+    def generate_fire_code(self):
+        self.fire_code = str(random.randint(1000, 9999))
+        self.fire_code_display.setText(f"Fire Code: {self.fire_code}")
+        self.fire_input.clear()
+        self.fire_input.setPlaceholderText("Enter code to fire")
+        self.fire_input.setStyleSheet("")
+
+    def reset_fire_code(self):
+        self.fire_code = None
+        self.fire_code_display.setText("Fire Code: --")
+        self.fire_input.clear()
+        self.fire_input.setPlaceholderText("Enter code to fire")
+        self.fire_input.setStyleSheet("")
+        self.fire_input.setEnabled(False)
+
+    def validate_fire_code(self, channel: int, label: str) -> bool:
+        if self.fire_code is None:
+            self.terminal.append(f"[CMD BLOCKED] FIRE {label} auth code unavailable")
+            self.terminal.ensureCursorVisible()
+            return False
+
+        if self.fire_input.text().strip() != self.fire_code:
+            self.fire_input.clear()
+            self.fire_input.setPlaceholderText("Wrong code!")
+            self.fire_input.setStyleSheet("border: 2px solid red;")
+            self.terminal.append(f"[CMD BLOCKED] FIRE {label} auth code mismatch")
+            self.terminal.ensureCursorVisible()
+            return False
+
+        self.fire_input.clear()
+        self.fire_input.setPlaceholderText("Enter code to fire")
+        self.fire_input.setStyleSheet("")
+        return True
 
     def do_disarm(self, *, send_remote: bool = True):
         if send_remote:
@@ -380,7 +449,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.pending_arm = False
         self.pending_disarm = False
+        self.arm_burst_sent = False
+        self.disarm_burst_sent = False
         self.disarm_confirm_timer.stop()
+        self.disarm_timeout_timer.stop()
         self.arm_timeout_timer.stop()
         self.armed = False
         self.reset_arm_controls("[SYS] DISARMED")
@@ -388,7 +460,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def begin_disarm_request(self):
         self.pending_arm = False
         self.pending_disarm = True
+        self.arm_burst_sent = False
+        self.disarm_burst_sent = False
         self.arm_timeout_timer.stop()
+        self.reset_fire_code()
         self.disarm_requested_at = time.monotonic()
         self.last_telemetry_at = self.disarm_requested_at
         self.last_continuity_at = 0.0
@@ -399,21 +474,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code_display.setStyleSheet(
             "font-size: 18px; font-weight: bold; color: orange;"
         )
-        self.terminal.append("[SYS] DISARM REQUEST SENT - waiting for telemetry to stop")
+        self.terminal.append("[SYS] DISARM REQUEST QUEUED - waiting for continuity packet")
         self.terminal.ensureCursorVisible()
-        self.queue_command(CMD_DISARM, 0, "DISARM")
+        self.disarm_timeout_timer.start(self.DISARM_CONFIRM_TIMEOUT_MS)
+
+    def send_disarm_request(self):
+        if not self.pending_disarm or self.disarm_burst_sent:
+            return
+
+        self.disarm_burst_sent = True
+        self.disarm_requested_at = time.monotonic()
+        self.last_telemetry_at = self.disarm_requested_at
+        self.terminal.append("[SYS] CONTINUITY RECEIVED - sending DISARM burst")
+        self.terminal.ensureCursorVisible()
+        self.queue_command(
+            CMD_DISARM,
+            0,
+            "DISARM",
+            should_send=lambda: self.pending_disarm,
+        )
         self.disarm_confirm_timer.start()
-        QtCore.QTimer.singleShot(self.DISARM_CONFIRM_TIMEOUT_MS, self.handle_disarm_timeout)
+        self.disarm_timeout_timer.start(self.DISARM_CONFIRM_TIMEOUT_MS)
 
     def confirm_disarm(self):
         if not self.pending_disarm:
             return
 
         self.pending_disarm = False
+        self.disarm_burst_sent = False
         self.disarm_confirm_timer.stop()
+        self.disarm_timeout_timer.stop()
         self.armed = False
         self.flight_state = self.STATE_IDLE
         self.update_flight_state_indicator()
+        self.reset_fire_code()
         self.reset_arm_controls("[SYS] DISARM CONFIRMED - continuity received and telemetry stopped")
 
     def handle_disarm_timeout(self):
@@ -421,12 +515,19 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.pending_disarm = False
+        disarm_was_sent = self.disarm_burst_sent
+        self.disarm_burst_sent = False
         self.disarm_confirm_timer.stop()
-        self.update_command_buttons()
-        self.terminal.append("[SYS] DISARM NOT CONFIRMED - telemetry still active or no continuity")
+        self.disarm_timeout_timer.stop()
+        if disarm_was_sent:
+            self.terminal.append("[SYS] DISARM NOT CONFIRMED - telemetry still active or no continuity")
+        else:
+            self.terminal.append("[SYS] DISARM NOT SENT - no continuity packet received")
         self.terminal.ensureCursorVisible()
 
         if self.armed and self.flight_state == self.STATE_ARMED:
+            self.generate_fire_code()
+            self.update_command_buttons()
             self.arm_code_display.setText("ARMED")
             self.arm_code_display.setStyleSheet(
                 "font-size: 18px; font-weight: bold; color: lime;"
@@ -434,11 +535,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.arm_btn.setEnabled(False)
             self.arm_input.setEnabled(False)
         else:
+            self.update_command_buttons()
             self.arm_btn.setEnabled(True)
             self.arm_input.setEnabled(True)
 
     def check_disarm_confirmation(self):
-        if not self.pending_disarm:
+        if not self.pending_disarm or not self.disarm_burst_sent:
             return
 
         now = time.monotonic()
@@ -451,6 +553,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.confirm_disarm()
 
     def reset_arm_controls(self, message: str):
+        self.arm_burst_sent = False
+        self.disarm_burst_sent = False
+        self.reset_fire_code()
         self.update_command_buttons()
         self.arm_btn.setEnabled(True)
         self.arm_input.setEnabled(True)
@@ -481,6 +586,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         label = {1: "Drogue", 2: "Main"}.get(channel, f"ch{channel}")
+        if not self.validate_fire_code(channel, label):
+            return
+
         self.queue_command(
             cmd_id,
             channel,
@@ -568,6 +676,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.terminal.append(f"[BAD CONT] {raw.hex()}")
             return
         self.last_continuity_at = time.monotonic()
+        if self.pending_arm and not self.arm_burst_sent:
+            self.send_arm_request()
+        if self.pending_disarm and not self.disarm_burst_sent:
+            self.send_disarm_request()
         self.check_disarm_confirmation()
 
         def update_btn(btn, label, ok):
