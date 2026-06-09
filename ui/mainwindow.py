@@ -20,9 +20,10 @@ class MainWindow(QtWidgets.QMainWindow):
     COMMAND_REPEATS = 5
     COMMAND_REPEAT_MS = 100
     ARM_CONFIRM_TIMEOUT_MS = 15000
-    DISARM_CONFIRM_TIMEOUT_MS = 2000
-    DISARM_TELEMETRY_GAP_SECONDS = 0.5
-    DISARM_CONFIRM_POLL_MS = 100
+    DISARM_CONFIRM_TIMEOUT_MS = 5000
+    DISARM_TELEMETRY_GAP_SECONDS = 1.0
+    DISARM_CONFIRM_POLL_MS = 50
+    DISARM_MAX_RETRIES = 3
     STATE_IDLE = 0
     STATE_ARMED = 1
 
@@ -450,6 +451,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pending_disarm = True
         self.arm_burst_sent = False
         self.disarm_burst_sent = False
+        self.disarm_attempts = 0
         self.arm_timeout_timer.stop()
         self.reset_fire_code()
         self.disarm_requested_at = time.monotonic()
@@ -467,13 +469,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.disarm_timeout_timer.start(self.DISARM_CONFIRM_TIMEOUT_MS)
 
     def send_disarm_request(self):
-        if not self.pending_disarm or self.disarm_burst_sent:
+        if not self.pending_disarm:
             return
 
+        # allow repeated attempts; increment attempt counter
+        self.disarm_attempts = getattr(self, 'disarm_attempts', 0) + 1
         self.disarm_burst_sent = True
         self.disarm_requested_at = time.monotonic()
         self.last_telemetry_at = self.disarm_requested_at
-        self.terminal.append("[SYS] CONTINUITY RECEIVED - sending DISARM burst")
+        self.terminal.append(f"[SYS] CONTINUITY RECEIVED - sending DISARM burst (attempt {self.disarm_attempts})")
         self.terminal.ensureCursorVisible()
         # send a dense burst to increase chance of hitting the flight controller's
         # short RX window (flight polls ~every 200ms and uses a 50ms RX timeout)
@@ -481,7 +485,7 @@ class MainWindow(QtWidgets.QMainWindow):
             CMD_DISARM,
             0,
             "DISARM",
-            repeats=10,
+            repeats=12,
             repeat_ms=25,
             should_send=lambda: self.pending_disarm,
         )
@@ -505,14 +509,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_disarm_timeout(self):
         if not self.pending_disarm:
             return
+        # If we haven't exceeded retry count, try another dense burst
+        self.disarm_confirm_timer.stop()
+        self.disarm_timeout_timer.stop()
+        attempts = getattr(self, 'disarm_attempts', 0)
+        if attempts < self.DISARM_MAX_RETRIES and self.pending_disarm:
+            self.terminal.append(f"[SYS] DISARM attempt {attempts} timed out — retrying")
+            self.terminal.ensureCursorVisible()
+            # allow another burst to be sent
+            self.disarm_burst_sent = False
+            QtCore.QTimer.singleShot(200, self.send_disarm_request)
+            return
 
+        # give up
         self.pending_disarm = False
         disarm_was_sent = self.disarm_burst_sent
         self.disarm_burst_sent = False
-        self.disarm_confirm_timer.stop()
-        self.disarm_timeout_timer.stop()
         if disarm_was_sent:
-            self.terminal.append("[SYS] DISARM NOT CONFIRMED - telemetry still active or no continuity")
+            self.terminal.append("[SYS] DISARM NOT CONFIRMED - telemetry still active or no continuity after retries")
         else:
             self.terminal.append("[SYS] DISARM NOT SENT - no continuity packet received")
         self.terminal.ensureCursorVisible()
@@ -541,7 +555,9 @@ class MainWindow(QtWidgets.QMainWindow):
             now - self.last_telemetry_at
         ) >= self.DISARM_TELEMETRY_GAP_SECONDS
 
-        if continuity_after_disarm and telemetry_quiet:
+        # confirm if we saw continuity after the request and telemetry has stopped,
+        # or if a telemetry packet reports the flight_state changed to IDLE
+        if (continuity_after_disarm and telemetry_quiet) or (self.flight_state == self.STATE_IDLE):
             self.confirm_disarm()
 
     def reset_arm_controls(self, message: str):
