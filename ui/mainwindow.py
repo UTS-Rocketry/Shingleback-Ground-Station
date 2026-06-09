@@ -17,6 +17,7 @@ from core.lora_worker import LoRaWorker
 
 class MainWindow(QtWidgets.QMainWindow):
     COMMAND_REPEATS = 5
+    COMMAND_REPEAT_MS = 100
     ARM_CONFIRM_TIMEOUT_MS = 15000
     STATE_IDLE = 0
     STATE_ARMED = 1
@@ -42,7 +43,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code = str(random.randint(1000, 9999))
         self.armed = False
         self.pending_arm = False
-        self.pending_command = None
         self.flight_state = 0
 
         n = 100
@@ -242,7 +242,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code_display.setStyleSheet(
             "font-size: 18px; font-weight: bold; color: orange;"
         )
-        self.terminal.append("[SYS] ARM REQUEST QUEUED - waiting for next telemetry")
+        self.terminal.append("[SYS] ARM REQUEST SENT - waiting for ARMED telemetry")
         self.terminal.ensureCursorVisible()
 
         self.send_arm_request()
@@ -269,7 +269,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.pending_arm = False
-        self.clear_pending_command("ARM")
         self.arm_timeout_timer.stop()
         self.armed = True
         self.btn_fire_drogue.setEnabled(True)
@@ -289,7 +288,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.pending_arm = False
-        self.clear_pending_command("ARM")
         self.armed = False
         self.btn_fire_drogue.setEnabled(False)
         self.btn_fire_main.setEnabled(False)
@@ -309,12 +307,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def air_packet_length(self, packet: bytes) -> int:
         return len(packet) + LoRaWorker.RADIOHEAD_HEADER_LENGTH
 
-    def clear_pending_command(self, label: str | None = None):
-        if self.pending_command is None:
-            return
-        if label is None or self.pending_command["label"] == label:
-            self.pending_command = None
-
     def queue_command(
         self,
         cmd_id: int,
@@ -327,37 +319,23 @@ class MainWindow(QtWidgets.QMainWindow):
             repeats = self.COMMAND_REPEATS
 
         pkt = build_command(cmd_id, channel)
-        self.pending_command = {
-            "packet": pkt,
-            "label": label,
-            "sent": 0,
-            "repeats": repeats,
-            "should_send": should_send,
-        }
         self.terminal.append(
-            f"[CMD QUEUED] {label} ({repeats} telemetry-synced packets, payload={len(pkt)}B, air={self.air_packet_length(pkt)}B)"
+            f"[CMD] {label} ({repeats} packets, payload={len(pkt)}B, air={self.air_packet_length(pkt)}B)"
         )
         self.terminal.ensureCursorVisible()
+        self.send_queued_packet(pkt, should_send)
+        for repeat in range(1, repeats):
+            QtCore.QTimer.singleShot(
+                repeat * self.COMMAND_REPEAT_MS,
+                lambda packet=pkt, predicate=should_send: self.send_queued_packet(
+                    packet,
+                    predicate,
+                ),
+            )
 
-    def send_pending_command_after_telemetry(self):
-        if self.pending_command is None:
-            return
-
-        command = self.pending_command
-        should_send = command["should_send"]
-        if should_send is not None and not should_send():
-            self.pending_command = None
-            return
-
-        self.worker.send(command["packet"])
-        command["sent"] += 1
-        self.terminal.append(
-            f"[CMD TX] {command['label']} {command['sent']}/{command['repeats']}"
-        )
-        self.terminal.ensureCursorVisible()
-
-        if command["sent"] >= command["repeats"]:
-            self.pending_command = None
+    def send_queued_packet(self, packet: bytes, should_send=None):
+        if should_send is None or should_send():
+            self.worker.send(packet)
 
     def update_flight_state_indicator(self):
         name, bg_color, fg_color = self.FLIGHT_STATES.get(
@@ -372,7 +350,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def do_disarm(self, *, send_remote: bool = True):
         self.pending_arm = False
-        self.clear_pending_command("ARM")
         self.arm_timeout_timer.stop()
 
         if send_remote:
@@ -450,7 +427,6 @@ class MainWindow(QtWidgets.QMainWindow):
             fire_enabled = self.flight_state == self.STATE_ARMED
             self.btn_fire_drogue.setEnabled(fire_enabled)
             self.btn_fire_main.setEnabled(fire_enabled)
-        self.send_pending_command_after_telemetry()
 
         self.terminal.append(
             f"[{parsed['sequence']:03d}] "
