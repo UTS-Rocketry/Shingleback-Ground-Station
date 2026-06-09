@@ -595,7 +595,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f"FIRE {label}",
             should_send=lambda: self.flight_state == self.STATE_ARMED,
         )
-        self.do_disarm(send_remote=False)
+        # Do NOT auto-disarm after firing — keep system armed so operator can
+        # send multiple FIRE commands. Manual disarm remains available.
 
     def on_lora_data(self, raw: bytes):
         if len(raw) < 2:
