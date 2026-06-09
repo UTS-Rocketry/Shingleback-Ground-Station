@@ -424,22 +424,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fire_input.setEnabled(False)
 
     def validate_fire_code(self, channel: int, label: str) -> bool:
-        if self.fire_code is None:
-            self.terminal.append(f"[CMD BLOCKED] FIRE {label} auth code unavailable")
-            self.terminal.ensureCursorVisible()
-            return False
-
-        if self.fire_input.text().strip() != self.fire_code:
-            self.fire_input.clear()
-            self.fire_input.setPlaceholderText("Wrong code!")
-            self.fire_input.setStyleSheet("border: 2px solid red;")
-            self.terminal.append(f"[CMD BLOCKED] FIRE {label} auth code mismatch")
-            self.terminal.ensureCursorVisible()
-            return False
-
-        self.fire_input.clear()
-        self.fire_input.setPlaceholderText("Enter code to fire")
-        self.fire_input.setStyleSheet("")
+        # Fire code authentication removed — allow firing while armed
         return True
 
     def do_disarm(self, *, send_remote: bool = True):
