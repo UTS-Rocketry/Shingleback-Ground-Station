@@ -6,6 +6,8 @@ import adafruit_rfm9x
 from PyQt5 import QtCore
 
 class LoRaWorker(QtCore.QThread):
+    RX_TIMEOUT_SECONDS = 0.1
+
     data_received = QtCore.pyqtSignal(bytes)
     error_occurred = QtCore.pyqtSignal(str)
 
@@ -46,7 +48,7 @@ class LoRaWorker(QtCore.QThread):
 
             # then RX
             try:
-                packet = self.rfm9x.receive(timeout=0.5, with_header=True)
+                packet = self.rfm9x.receive(timeout=self.RX_TIMEOUT_SECONDS, with_header=True)
                 if packet is not None:
                     self.data_received.emit(bytes(packet[4:]))
             except Exception as e:

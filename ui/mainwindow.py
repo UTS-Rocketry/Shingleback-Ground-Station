@@ -9,6 +9,9 @@ from core.lora_worker import LoRaWorker
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    FIRE_COMMAND_REPEATS = 10
+    FIRE_COMMAND_REPEAT_MS = 100
+
     FLIGHT_STATES = {
         0: ("IDLE", "grey", "white"),
         1: ("PAD", "orange", "black"),
@@ -253,6 +256,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.terminal.ensureCursorVisible()
 
     def send_command(self, cmd_id: int, channel: int):
+        if not self.armed:
+            self.terminal.append("[CMD BLOCKED] System is disarmed; command not sent")
+            self.terminal.ensureCursorVisible()
+            return
+
         if self.flight_state > 1:
             state_name = self.FLIGHT_STATES.get(
                 self.flight_state,
@@ -264,9 +272,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         pkt = build_command(cmd_id, channel)
         label = {1: "Drogue", 2: "Main"}.get(channel, f"ch{channel}")
-        self.terminal.append(f"[CMD] FIRE {label}")
+        self.terminal.append(
+            f"[CMD] FIRE {label} ({self.FIRE_COMMAND_REPEATS} packets)"
+        )
         self.terminal.ensureCursorVisible()
         self.worker.send(pkt)
+        for repeat in range(1, self.FIRE_COMMAND_REPEATS):
+            QtCore.QTimer.singleShot(
+                repeat * self.FIRE_COMMAND_REPEAT_MS,
+                lambda packet=pkt: self.worker.send(packet),
+            )
         self.do_disarm()
 
     def on_lora_data(self, raw: bytes):
