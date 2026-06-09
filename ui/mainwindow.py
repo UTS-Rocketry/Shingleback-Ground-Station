@@ -318,7 +318,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def queue_command(self, cmd_id: int, channel: int, label: str, should_send=None):
         pkt = build_command(cmd_id, channel)
-        self.terminal.append(f"[CMD] {label} ({self.COMMAND_REPEATS} packets)")
+        air_len = len(pkt) + LoRaWorker.RADIOHEAD_HEADER_LENGTH
+        self.terminal.append(
+            f"[CMD] {label} ({self.COMMAND_REPEATS} packets, payload={len(pkt)}B, air={air_len}B)"
+        )
         self.terminal.ensureCursorVisible()
         self.send_queued_packet(pkt, should_send)
         for repeat in range(1, self.COMMAND_REPEATS):

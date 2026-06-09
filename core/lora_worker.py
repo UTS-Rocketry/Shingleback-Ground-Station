@@ -7,6 +7,8 @@ from PyQt5 import QtCore
 
 class LoRaWorker(QtCore.QThread):
     RX_TIMEOUT_SECONDS = 0.1
+    RADIOHEAD_HEADER = (0xFF, 0xFF, 0x00, 0x00)
+    RADIOHEAD_HEADER_LENGTH = 4
 
     data_received = QtCore.pyqtSignal(bytes)
     error_occurred = QtCore.pyqtSignal(str)
@@ -34,6 +36,19 @@ class LoRaWorker(QtCore.QThread):
     def send(self, data: bytes):
         self._send_queue.put(data)  # just queue it, returns immediately
 
+    def send_radiohead_packet(self, data: bytes):
+        destination, node, identifier, flags = self.RADIOHEAD_HEADER
+        try:
+            self.rfm9x.send(
+                data,
+                destination=destination,
+                node=node,
+                identifier=identifier,
+                flags=flags,
+            )
+        except TypeError:
+            self.rfm9x.send(data, tx_header=self.RADIOHEAD_HEADER)
+
     def run(self):
         if not self.init_radio():
             return
@@ -42,7 +57,7 @@ class LoRaWorker(QtCore.QThread):
             # send anything queued first
             try:
                 data = self._send_queue.get_nowait()
-                self.rfm9x.send(data)
+                self.send_radiohead_packet(data)
             except queue.Empty:
                 pass
 
