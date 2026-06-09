@@ -233,9 +233,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def begin_arm_request(self):
         self.pending_arm = True
         self.armed = False
-        self.btn_fire_drogue.setEnabled(False)
-        self.btn_fire_main.setEnabled(False)
-        self.disarm_btn.setEnabled(True)
+        self.update_command_buttons()
         self.arm_btn.setEnabled(False)
         self.arm_input.setEnabled(False)
         self.arm_code_display.setText("ARMING...")
@@ -271,9 +269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pending_arm = False
         self.arm_timeout_timer.stop()
         self.armed = True
-        self.btn_fire_drogue.setEnabled(True)
-        self.btn_fire_main.setEnabled(True)
-        self.disarm_btn.setEnabled(True)
+        self.update_command_buttons()
         self.arm_btn.setEnabled(False)
         self.arm_input.setEnabled(False)
         self.arm_code_display.setText("ARMED")
@@ -289,9 +285,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.pending_arm = False
         self.armed = False
-        self.btn_fire_drogue.setEnabled(False)
-        self.btn_fire_main.setEnabled(False)
-        self.disarm_btn.setEnabled(False)
+        self.update_command_buttons()
         self.arm_btn.setEnabled(True)
         self.arm_input.setEnabled(True)
         self.arm_input.clear()
@@ -348,6 +342,13 @@ class MainWindow(QtWidgets.QMainWindow):
             f"background-color: {bg_color}; color: {fg_color}; border-radius: 4px;"
         )
 
+    def update_command_buttons(self):
+        fire_enabled = self.armed and self.flight_state == self.STATE_ARMED
+        disarm_enabled = self.pending_arm or self.flight_state == self.STATE_ARMED
+        self.btn_fire_drogue.setEnabled(fire_enabled)
+        self.btn_fire_main.setEnabled(fire_enabled)
+        self.disarm_btn.setEnabled(disarm_enabled)
+
     def do_disarm(self, *, send_remote: bool = True):
         self.pending_arm = False
         self.arm_timeout_timer.stop()
@@ -356,9 +357,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.queue_command(CMD_DISARM, 0, "DISARM")
 
         self.armed = False
-        self.btn_fire_drogue.setEnabled(False)
-        self.btn_fire_main.setEnabled(False)
-        self.disarm_btn.setEnabled(False)
+        self.update_command_buttons()
         self.arm_btn.setEnabled(True)
         self.arm_input.setEnabled(True)
         self.arm_input.clear()
@@ -423,10 +422,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_flight_state_indicator()
         if self.pending_arm and self.flight_state == self.STATE_ARMED:
             self.confirm_arm()
-        if self.armed:
-            fire_enabled = self.flight_state == self.STATE_ARMED
-            self.btn_fire_drogue.setEnabled(fire_enabled)
-            self.btn_fire_main.setEnabled(fire_enabled)
+        self.update_command_buttons()
 
         self.terminal.append(
             f"[{parsed['sequence']:03d}] "
