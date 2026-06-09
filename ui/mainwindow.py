@@ -358,9 +358,12 @@ class MainWindow(QtWidgets.QMainWindow):
         label: str,
         repeats: int | None = None,
         should_send=None,
+        repeat_ms: int | None = None,
     ):
         if repeats is None:
             repeats = self.COMMAND_REPEATS
+        if repeat_ms is None:
+            repeat_ms = self.COMMAND_REPEAT_MS
 
         pkt = build_command(cmd_id, channel)
         self.terminal.append(
@@ -370,7 +373,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.send_queued_packet(pkt, should_send)
         for repeat in range(1, repeats):
             QtCore.QTimer.singleShot(
-                repeat * self.COMMAND_REPEAT_MS,
+                repeat * repeat_ms,
                 lambda packet=pkt, predicate=should_send: self.send_queued_packet(
                     packet,
                     predicate,
@@ -472,10 +475,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_telemetry_at = self.disarm_requested_at
         self.terminal.append("[SYS] CONTINUITY RECEIVED - sending DISARM burst")
         self.terminal.ensureCursorVisible()
+        # send a dense burst to increase chance of hitting the flight controller's
+        # short RX window (flight polls ~every 200ms and uses a 50ms RX timeout)
         self.queue_command(
             CMD_DISARM,
             0,
             "DISARM",
+            repeats=10,
+            repeat_ms=25,
             should_send=lambda: self.pending_disarm,
         )
         self.disarm_confirm_timer.start()
