@@ -7,6 +7,7 @@ from PyQt5 import QtCore
 
 class LoRaWorker(QtCore.QThread):
     RX_TIMEOUT_SECONDS = 0.1
+    PAYLOAD_SYNC_WORD = 0xAA
     RADIOHEAD_HEADER = (0xFF, 0xFF, 0x00, 0x00)
     RADIOHEAD_HEADER_LENGTH = 4
 
@@ -41,13 +42,31 @@ class LoRaWorker(QtCore.QThread):
         try:
             self.rfm9x.send(
                 data,
+                keep_listening=True,
                 destination=destination,
                 node=node,
                 identifier=identifier,
                 flags=flags,
             )
         except TypeError:
-            self.rfm9x.send(data, tx_header=self.RADIOHEAD_HEADER)
+            try:
+                self.rfm9x.send(
+                    data,
+                    keep_listening=True,
+                    tx_header=self.RADIOHEAD_HEADER,
+                )
+            except TypeError:
+                self.rfm9x.send(data)
+
+    def strip_radiohead_header(self, packet: bytes) -> bytes:
+        if len(packet) >= 1 and packet[0] == self.PAYLOAD_SYNC_WORD:
+            return bytes(packet)
+        if (
+            len(packet) > self.RADIOHEAD_HEADER_LENGTH
+            and packet[self.RADIOHEAD_HEADER_LENGTH] == self.PAYLOAD_SYNC_WORD
+        ):
+            return bytes(packet[self.RADIOHEAD_HEADER_LENGTH:])
+        return bytes(packet)
 
     def run(self):
         if not self.init_radio():
@@ -65,7 +84,7 @@ class LoRaWorker(QtCore.QThread):
             try:
                 packet = self.rfm9x.receive(timeout=self.RX_TIMEOUT_SECONDS, with_header=True)
                 if packet is not None:
-                    self.data_received.emit(bytes(packet[4:]))
+                    self.data_received.emit(self.strip_radiohead_header(packet))
             except Exception as e:
                 self.error_occurred.emit(f"LoRa RX error: {str(e)}")
 
