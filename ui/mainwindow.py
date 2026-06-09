@@ -1,5 +1,6 @@
 import sys
 import random
+import time
 from PyQt5 import QtWidgets, QtCore
 from collections import deque
 import pyqtgraph as pg
@@ -19,11 +20,14 @@ class MainWindow(QtWidgets.QMainWindow):
     COMMAND_REPEATS = 5
     COMMAND_REPEAT_MS = 100
     ARM_CONFIRM_TIMEOUT_MS = 15000
+    DISARM_CONFIRM_TIMEOUT_MS = 2000
+    DISARM_TELEMETRY_GAP_SECONDS = 0.5
+    DISARM_CONFIRM_POLL_MS = 100
     STATE_IDLE = 0
     STATE_ARMED = 1
 
     FLIGHT_STATES = {
-        0: ("IDLE", "grey", "white"),
+        0: ("DISARMED", "grey", "white"),
         1: ("ARMED", "orange", "black"),
         2: ("POWERED ASCENT", "yellow", "black"),
         3: ("COASTING", "cyan", "black"),
@@ -43,6 +47,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code = str(random.randint(1000, 9999))
         self.armed = False
         self.pending_arm = False
+        self.pending_disarm = False
+        self.disarm_requested_at = 0.0
+        self.last_telemetry_at = 0.0
+        self.last_continuity_at = 0.0
         self.flight_state = 0
 
         n = 100
@@ -218,6 +226,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_timeout_timer = QtCore.QTimer(self)
         self.arm_timeout_timer.setSingleShot(True)
         self.arm_timeout_timer.timeout.connect(self.handle_arm_timeout)
+
+        self.disarm_confirm_timer = QtCore.QTimer(self)
+        self.disarm_confirm_timer.setInterval(self.DISARM_CONFIRM_POLL_MS)
+        self.disarm_confirm_timer.timeout.connect(self.check_disarm_confirmation)
         self.worker.start()
 
     def try_arm(self):
@@ -233,6 +245,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def begin_arm_request(self):
         self.pending_arm = True
         self.armed = False
+        self.pending_disarm = False
+        self.disarm_confirm_timer.stop()
         self.update_command_buttons()
         self.arm_btn.setEnabled(False)
         self.arm_input.setEnabled(False)
@@ -269,6 +283,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pending_arm = False
         self.arm_timeout_timer.stop()
         self.armed = True
+        self.pending_disarm = False
+        self.disarm_confirm_timer.stop()
         self.update_command_buttons()
         self.arm_btn.setEnabled(False)
         self.arm_input.setEnabled(False)
@@ -343,20 +359,98 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def update_command_buttons(self):
-        fire_enabled = self.armed and self.flight_state == self.STATE_ARMED
-        disarm_enabled = self.pending_arm or self.flight_state == self.STATE_ARMED
+        fire_enabled = (
+            self.armed
+            and self.flight_state == self.STATE_ARMED
+            and not self.pending_disarm
+        )
+        disarm_enabled = (
+            self.pending_arm
+            or self.pending_disarm
+            or self.flight_state == self.STATE_ARMED
+        )
         self.btn_fire_drogue.setEnabled(fire_enabled)
         self.btn_fire_main.setEnabled(fire_enabled)
         self.disarm_btn.setEnabled(disarm_enabled)
 
     def do_disarm(self, *, send_remote: bool = True):
-        self.pending_arm = False
-        self.arm_timeout_timer.stop()
-
         if send_remote:
-            self.queue_command(CMD_DISARM, 0, "DISARM")
+            self.begin_disarm_request()
+            return
 
+        self.pending_arm = False
+        self.pending_disarm = False
+        self.disarm_confirm_timer.stop()
+        self.arm_timeout_timer.stop()
         self.armed = False
+        self.reset_arm_controls("[SYS] DISARMED")
+
+    def begin_disarm_request(self):
+        self.pending_arm = False
+        self.pending_disarm = True
+        self.arm_timeout_timer.stop()
+        self.disarm_requested_at = time.monotonic()
+        self.last_telemetry_at = self.disarm_requested_at
+        self.last_continuity_at = 0.0
+        self.update_command_buttons()
+        self.arm_btn.setEnabled(False)
+        self.arm_input.setEnabled(False)
+        self.arm_code_display.setText("DISARMING...")
+        self.arm_code_display.setStyleSheet(
+            "font-size: 18px; font-weight: bold; color: orange;"
+        )
+        self.terminal.append("[SYS] DISARM REQUEST SENT - waiting for telemetry to stop")
+        self.terminal.ensureCursorVisible()
+        self.queue_command(CMD_DISARM, 0, "DISARM")
+        self.disarm_confirm_timer.start()
+        QtCore.QTimer.singleShot(self.DISARM_CONFIRM_TIMEOUT_MS, self.handle_disarm_timeout)
+
+    def confirm_disarm(self):
+        if not self.pending_disarm:
+            return
+
+        self.pending_disarm = False
+        self.disarm_confirm_timer.stop()
+        self.armed = False
+        self.flight_state = self.STATE_IDLE
+        self.update_flight_state_indicator()
+        self.reset_arm_controls("[SYS] DISARM CONFIRMED - continuity received and telemetry stopped")
+
+    def handle_disarm_timeout(self):
+        if not self.pending_disarm:
+            return
+
+        self.pending_disarm = False
+        self.disarm_confirm_timer.stop()
+        self.update_command_buttons()
+        self.terminal.append("[SYS] DISARM NOT CONFIRMED - telemetry still active or no continuity")
+        self.terminal.ensureCursorVisible()
+
+        if self.armed and self.flight_state == self.STATE_ARMED:
+            self.arm_code_display.setText("ARMED")
+            self.arm_code_display.setStyleSheet(
+                "font-size: 18px; font-weight: bold; color: lime;"
+            )
+            self.arm_btn.setEnabled(False)
+            self.arm_input.setEnabled(False)
+        else:
+            self.arm_btn.setEnabled(True)
+            self.arm_input.setEnabled(True)
+
+    def check_disarm_confirmation(self):
+        if not self.pending_disarm:
+            return
+
+        now = time.monotonic()
+        continuity_after_disarm = self.last_continuity_at > self.disarm_requested_at
+        telemetry_quiet = (
+            now - self.last_telemetry_at
+        ) >= self.DISARM_TELEMETRY_GAP_SECONDS
+
+        if continuity_after_disarm and telemetry_quiet:
+            self.confirm_disarm()
+
+    def reset_arm_controls(self, message: str):
         self.update_command_buttons()
         self.arm_btn.setEnabled(True)
         self.arm_input.setEnabled(True)
@@ -368,7 +462,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code_display.setStyleSheet(
             "font-family: Courier; font-size: 22px; font-weight: bold; color: red;"
         )
-        self.terminal.append("[SYS] DISARMED")
+        self.terminal.append(message)
         self.terminal.ensureCursorVisible()
 
     def send_command(self, cmd_id: int, channel: int):
@@ -418,6 +512,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.terminal.append(f"[BAD TELEM] {raw.hex()}")
             return
 
+        self.last_telemetry_at = time.monotonic()
         self.flight_state = parsed['flight_state']
         self.update_flight_state_indicator()
         if self.pending_arm and self.flight_state == self.STATE_ARMED:
@@ -472,6 +567,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if parsed is None:
             self.terminal.append(f"[BAD CONT] {raw.hex()}")
             return
+        self.last_continuity_at = time.monotonic()
+        self.check_disarm_confirmation()
 
         def update_btn(btn, label, ok):
             btn.setText(f"{label}: {'OK' if ok else 'OPEN'}")
