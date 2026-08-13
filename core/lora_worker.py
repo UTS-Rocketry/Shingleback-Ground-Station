@@ -7,7 +7,12 @@ from PyQt5 import QtCore
 
 class LoRaWorker(QtCore.QThread):
     RX_TIMEOUT_SECONDS = 0.02
-    PAYLOAD_SYNC_WORD = 0xAA
+    FREQUENCY_MHZ = 915.0
+    SPREADING_FACTOR = 7
+    SIGNAL_BANDWIDTH_HZ = 125000
+    CODING_RATE_DENOMINATOR = 5
+    PREAMBLE_LENGTH = 8
+    LORA_SYNC_WORD = 0x12  # Fixed LoRa-mode default in adafruit_rfm9x.
     RADIOHEAD_HEADER = (0xFF, 0xFF, 0x00, 0x00)
     RADIOHEAD_HEADER_LENGTH = 4
 
@@ -25,10 +30,12 @@ class LoRaWorker(QtCore.QThread):
             spi = busio.SPI(board.SCLK, MOSI=board.MOSI, MISO=board.MISO)
             cs  = digitalio.DigitalInOut(board.D25)
             rst = digitalio.DigitalInOut(board.D27)
-            self.rfm9x = adafruit_rfm9x.RFM9x(spi, cs, rst, 915.0)
-            self.rfm9x.spreading_factor = 7
-            self.rfm9x.signal_bandwidth = 125000
-            self.rfm9x.coding_rate = 5
+            self.rfm9x = adafruit_rfm9x.RFM9x(spi, cs, rst, self.FREQUENCY_MHZ)
+            self.rfm9x.spreading_factor = self.SPREADING_FACTOR
+            self.rfm9x.signal_bandwidth = self.SIGNAL_BANDWIDTH_HZ
+            self.rfm9x.coding_rate = self.CODING_RATE_DENOMINATOR
+            self.rfm9x.preamble_length = self.PREAMBLE_LENGTH
+            self.rfm9x.enable_crc = True
             return True
         except Exception as e:
             self.error_occurred.emit(f"LoRa init failed: {str(e)}")
@@ -58,16 +65,6 @@ class LoRaWorker(QtCore.QThread):
             except TypeError:
                 self.rfm9x.send(data)
 
-    def strip_radiohead_header(self, packet: bytes) -> bytes:
-        if len(packet) >= 1 and packet[0] == self.PAYLOAD_SYNC_WORD:
-            return bytes(packet)
-        if (
-            len(packet) > self.RADIOHEAD_HEADER_LENGTH
-            and packet[self.RADIOHEAD_HEADER_LENGTH] == self.PAYLOAD_SYNC_WORD
-        ):
-            return bytes(packet[self.RADIOHEAD_HEADER_LENGTH:])
-        return bytes(packet)
-
     def run(self):
         if not self.init_radio():
             return
@@ -84,7 +81,9 @@ class LoRaWorker(QtCore.QThread):
             try:
                 packet = self.rfm9x.receive(timeout=self.RX_TIMEOUT_SECONDS, with_header=True)
                 if packet is not None:
-                    self.data_received.emit(self.strip_radiohead_header(packet))
+                    # Keep the four receiver-routing bytes. Packet parsers validate
+                    # and decode fields using the flight-computer's raw offsets.
+                    self.data_received.emit(bytes(packet))
             except Exception as e:
                 self.error_occurred.emit(f"LoRa RX error: {str(e)}")
 

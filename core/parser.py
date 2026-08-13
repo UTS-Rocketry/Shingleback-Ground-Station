@@ -31,14 +31,30 @@ def parse_line(line):
 
 import struct
 
-SYNC_WORD       = 0xAA
-PKT_TELEMETRY   = 0x01
-PKT_CONTINUITY  = 0x02
-PKT_COMMAND     = 0x03
-CMD_ARM         = 0x01
-CMD_FIRE        = 0x02
-CMD_DISARM      = 0x03
-CMD_AUTH_BYTE   = 0xBE
+RECEIVER_HEADER = b"\x00\x00\x00\x00"
+RECEIVER_HEADER_LENGTH = len(RECEIVER_HEADER)
+SYNC_WORD = 0xAA
+PKT_TELEMETRY = 0x00
+PKT_GPS = 0x01
+PKT_CONTINUITY = 0x02
+PKT_COMMAND = 0x03
+GPS_RAW_PACKET_LENGTH = 37
+
+CMD_ARM = 0x01
+CMD_FIRE = 0x02
+CMD_DISARM = 0x03
+CMD_AUTH_BYTE = 0xBE
+
+FLIGHT_STATES = {
+    0: "IDLE",
+    1: "PAD",
+    2: "BOOST",
+    3: "COAST",
+    4: "APOGEE",
+    5: "DROGUE",
+    6: "PARAFOIL",
+    7: "LAND",
+}
 
 def crc16(data: bytes) -> int:
     crc = 0
@@ -52,31 +68,47 @@ def crc16(data: bytes) -> int:
             crc &= 0xFFFF
     return crc
 
+
+def packet_type(data: bytes) -> int | None:
+    """Return the application packet type from a raw receiver frame."""
+    if len(data) < RECEIVER_HEADER_LENGTH + 2:
+        return None
+    if data[:RECEIVER_HEADER_LENGTH] != RECEIVER_HEADER:
+        return None
+    if data[RECEIVER_HEADER_LENGTH] != SYNC_WORD:
+        return None
+    return data[RECEIVER_HEADER_LENGTH + 1]
+
+
+def _application_payload(data: bytes) -> bytes | None:
+    if packet_type(data) is None:
+        return None
+    return data[RECEIVER_HEADER_LENGTH:]
+
+
 def parse_telemetry(data: bytes) -> dict | None:
-    if len(data) < 58:
+    payload = _application_payload(data)
+    if payload is None or len(payload) < 58:
         return None
-    if data[0] != SYNC_WORD:
-        return None
-    if data[1] != PKT_TELEMETRY:
+    if payload[1] != PKT_TELEMETRY:
         return None
 
-    pkt_type = data[1]
-    seq = data[2]
+    pkt_type = payload[1]
+    seq = payload[2]
 
     (altitude, pressure, temperature,
      x_mg, y_mg, z_mg,
      x_mg_imu, y_mg_imu, z_mg_imu,
      x_gy, y_gy, z_gy,
-     velocity) = struct.unpack('>fffffffffffff', data[3:55])
+     velocity) = struct.unpack('>fffffffffffff', payload[3:55])
     x_gy /= 1000.0
     y_gy /= 1000.0
     z_gy /= 1000.0
 
-    flight_state = data[55]
+    flight_state = payload[55]
 
-    crc_received   = (data[56] << 8) | data[57]
-    crc_calculated = crc16(data[:56])
-    print(f"CRC received: {crc_received:#06x} | CRC calculated: {crc_calculated:#06x}")
+    crc_received = int.from_bytes(payload[56:58], "big")
+    crc_calculated = crc16(payload[:56])
     if crc_received != crc_calculated:
         return None
 
@@ -93,21 +125,71 @@ def parse_telemetry(data: bytes) -> dict | None:
         'flight_state': flight_state,
     }
 
+
+def parse_gps(data: bytes) -> dict | None:
+    """Decode a complete 37-byte GPS radio frame, including receiver header."""
+    if len(data) != GPS_RAW_PACKET_LENGTH:
+        return None
+    if data[:RECEIVER_HEADER_LENGTH] != RECEIVER_HEADER:
+        return None
+
+    payload = data[RECEIVER_HEADER_LENGTH:]
+    if payload[0] != SYNC_WORD or payload[1] != PKT_GPS:
+        return None
+
+    crc_received = int.from_bytes(data[35:37], "big")
+    crc_calculated = crc16(data[4:35])
+    if crc_received != crc_calculated:
+        return None
+
+    status = data[7]
+    (
+        latitude_raw,
+        longitude_raw,
+        altitude_mm,
+        ground_speed_cms,
+        utc_ms,
+        course_cdeg,
+        information_age_ms,
+        flight_state,
+    ) = struct.unpack(">iiiIIHHB", data[10:35])
+
+    return {
+        "packet_type": PKT_GPS,
+        "sequence": data[6],
+        "status_flags": status,
+        "fix_valid": bool(status & 0x01),
+        "gga_received": bool(status & 0x02),
+        "rmc_active": bool(status & 0x04),
+        "uart_error": bool(status & 0x08),
+        "fix_quality": data[8],
+        "satellites": data[9],
+        "latitude": latitude_raw / 10_000_000.0,
+        "longitude": longitude_raw / 10_000_000.0,
+        "altitude_m": altitude_mm / 1000.0,
+        "ground_speed_mps": ground_speed_cms / 100.0,
+        "utc_ms": utc_ms,
+        "course_deg": course_cdeg / 100.0,
+        "information_age_ms": information_age_ms,
+        "flight_state": flight_state,
+        "flight_state_name": FLIGHT_STATES.get(flight_state, f"UNKNOWN {flight_state}"),
+    }
+
+
 def parse_continuity(data: bytes) -> dict | None:
-    if len(data) < 8:
+    payload = _application_payload(data)
+    if payload is None or len(payload) < 8:
         return None
-    if data[0] != SYNC_WORD:
-        return None
-    if data[1] != PKT_CONTINUITY:
+    if payload[1] != PKT_CONTINUITY:
         return None
 
-    seq    = data[2]
-    main   = data[3]
-    drogue = data[4]
-    aux    = data[5]
+    seq = payload[2]
+    main = payload[3]
+    drogue = payload[4]
+    aux = payload[5]
 
-    crc_received   = (data[6] << 8) | data[7]
-    crc_calculated = crc16(data[:6])
+    crc_received = int.from_bytes(payload[6:8], "big")
+    crc_calculated = crc16(payload[:6])
     if crc_received != crc_calculated:
         return None
 
@@ -117,6 +199,7 @@ def parse_continuity(data: bytes) -> dict | None:
         'drogue': bool(drogue),
         'aux':    bool(aux),
     }
+
 
 def build_command(cmd_id: int, channel: int) -> bytes:
     buff = bytearray(9)

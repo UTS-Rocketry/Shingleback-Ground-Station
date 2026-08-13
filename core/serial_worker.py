@@ -4,7 +4,7 @@ from PyQt5 import QtCore
 class SerialWorker(QtCore.QThread):
     data_received = QtCore.pyqtSignal(str)
 
-    def __init__(self, port, baud=115200):
+    def __init__(self, port, baud=9600):
         super().__init__()
         self.port = port
         self.baud = baud

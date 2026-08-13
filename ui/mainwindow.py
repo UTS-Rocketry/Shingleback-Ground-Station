@@ -1,14 +1,18 @@
-import sys
 import random
 import time
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 from collections import deque
 import pyqtgraph as pg
 
 from core.parser import (
     parse_telemetry,
+    parse_gps,
     parse_continuity,
+    packet_type,
     build_command,
+    PKT_TELEMETRY,
+    PKT_GPS,
+    PKT_CONTINUITY,
     CMD_ARM,
     CMD_FIRE,
     CMD_DISARM,
@@ -28,21 +32,52 @@ class MainWindow(QtWidgets.QMainWindow):
     STATE_ARMED = 1
 
     FLIGHT_STATES = {
-        0: ("DISARMED", "grey", "white"),
-        1: ("ARMED", "orange", "black"),
-        2: ("POWERED ASCENT", "yellow", "black"),
-        3: ("COASTING", "cyan", "black"),
-        4: ("APOGEE", "magenta", "white"),
-        5: ("DESCENT", "deepskyblue", "black"),
-        6: ("LANDED", "lime", "black"),
-        7: ("FAULT", "red", "white"),
-        8: ("BENCHTEST", "white", "black"),
+        0: ("IDLE", "#363b42", "#d7dce2"),
+        1: ("PAD", "#f79322", "#08090a"),
+        2: ("BOOST", "#ffd931", "#08090a"),
+        3: ("COAST", "#2ad6ff", "#08090a"),
+        4: ("APOGEE", "#b76cff", "#ffffff"),
+        5: ("DROGUE", "#5bb4f0", "#08090a"),
+        6: ("PARAFOIL", "#22e2bb", "#08090a"),
+        7: ("LAND", "#36dd76", "#08090a"),
     }
+
+    THEME = """
+        QMainWindow, QWidget#root { background: #050607; color: #e8eaed; }
+        QWidget { color: #e8eaed; font-family: DejaVu Sans; font-size: 11pt; }
+        QFrame#header { background: #0a0c0f; border-bottom: 2px solid #f79322; }
+        QLabel#brand { color: #ffffff; font-size: 20pt; font-weight: 800; letter-spacing: 1pt; }
+        QLabel#subtitle { color: #f79322; font-size: 9pt; font-weight: 700; letter-spacing: 2pt; }
+        QFrame#card { background: #0a0c0f; border: 1px solid #282d33; border-top: 2px solid #f79322; border-radius: 3px; }
+        QLabel#sectionTitle { color: #f79322; font-family: DejaVu Sans Mono; font-size: 11pt; font-weight: 800; }
+        QLabel#metricName { color: #9aa2ad; font-size: 9pt; font-weight: 700; }
+        QLabel#metricValue { color: #f2f4f7; font-family: DejaVu Sans Mono; font-size: 12pt; font-weight: 700; }
+        QLabel#muted { color: #8b949f; font-family: DejaVu Sans Mono; font-size: 9pt; }
+        QLabel#statusChip { background: #15191e; border: 1px solid #343a42; border-radius: 3px; padding: 8px 12px; font-family: DejaVu Sans Mono; font-size: 10pt; font-weight: 700; }
+        QLineEdit { background: #050607; border: 1px solid #343a42; border-radius: 3px; color: #ffffff; padding: 10px; font-family: DejaVu Sans Mono; font-size: 10pt; }
+        QLineEdit:focus { border-color: #f79322; }
+        QPushButton { background: #171b20; border: 1px solid #3b424b; border-radius: 3px; color: #f2f4f7; padding: 10px 14px; font-size: 10pt; font-weight: 700; }
+        QPushButton:hover { border-color: #f79322; background: #22272e; }
+        QPushButton:pressed { background: #0f1215; }
+        QPushButton:disabled { color: #555d66; border-color: #282d33; background: #0c0e11; }
+        QPushButton#danger { background: #4a1015; border-color: #b92b38; color: #ffffff; }
+        QPushButton#danger:hover { background: #681821; border-color: #ff5261; }
+        QPushButton#primary { background: #6a3e0b; border-color: #f79322; color: #ffffff; }
+        QTextEdit { background: #030405; border: 1px solid #282d33; color: #cdd3da; font-family: DejaVu Sans Mono; font-size: 10pt; padding: 8px; }
+        QScrollArea { border: 0; background: transparent; }
+        QSplitter::handle { background: #171b20; }
+        QSplitter::handle:hover { background: #f79322; }
+        QScrollBar:vertical { background: #090b0d; width: 14px; }
+        QScrollBar::handle:vertical { background: #343a42; min-height: 28px; border-radius: 4px; }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+    """
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Shingleback Ground Station")
-        self.resize(1400, 800)
+        self.setWindowTitle("Shingleback · ODIN Ground Control")
+        self.resize(1540, 940)
+        self.setMinimumSize(1100, 720)
+        self.setStyleSheet(self.THEME)
 
         # Arm state
         self.arm_code = str(random.randint(1000, 9999))
@@ -56,188 +91,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_telemetry_at = 0.0
         self.last_continuity_at = 0.0
         self.flight_state = 0
+        self.packet_count = 0
+        self.gps_packet_count = 0
 
         n = 100
-        self.alt  = deque([0]*n, maxlen=n)
-        self.gy_x = deque([0]*n, maxlen=n)
-        self.gy_y = deque([0]*n, maxlen=n)
-        self.gy_z = deque([0]*n, maxlen=n)
-        self.xl_x = deque([0]*n, maxlen=n)
-        self.xl_y = deque([0]*n, maxlen=n)
-        self.xl_z = deque([0]*n, maxlen=n)
-        self.vel  = deque([0]*n, maxlen=n)
+        self.alt = deque(maxlen=n)
+        self.gy_x = deque(maxlen=n)
+        self.gy_y = deque(maxlen=n)
+        self.gy_z = deque(maxlen=n)
+        self.xl_x = deque(maxlen=n)
+        self.xl_y = deque(maxlen=n)
+        self.xl_z = deque(maxlen=n)
+        self.vel = deque(maxlen=n)
 
-        # --- Plots ---
-        self.plot_widget = pg.GraphicsLayoutWidget()
+        root = QtWidgets.QWidget()
+        root.setObjectName("root")
+        root_layout = QtWidgets.QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        root_layout.addWidget(self._build_header())
 
-        alt_plot = self.plot_widget.addPlot(title="Altitude (m)")
-        self.alt_curve = alt_plot.plot(pen='y')
-        self.plot_widget.nextRow()
+        body = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        body.setHandleWidth(3)
+        body.addWidget(self._build_data_workspace())
+        body.addWidget(self._build_dashboard())
+        body.setSizes([1040, 500])
+        body.setStretchFactor(0, 1)
+        body.setStretchFactor(1, 0)
+        root_layout.addWidget(body, 1)
+        self.setCentralWidget(root)
 
-        gy_plot = self.plot_widget.addPlot(title="Gyro (dps)")
-        self.gy_x_curve = gy_plot.plot(pen='r', name="X")
-        self.gy_y_curve = gy_plot.plot(pen='g', name="Y")
-        self.gy_z_curve = gy_plot.plot(pen='b', name="Z")
-        self.plot_widget.nextRow()
-
-        xl_plot = self.plot_widget.addPlot(title="IMU Accel (mg)")
-        self.xl_x_curve = xl_plot.plot(pen='r', name="X")
-        self.xl_y_curve = xl_plot.plot(pen='g', name="Y")
-        self.xl_z_curve = xl_plot.plot(pen='b', name="Z")
-        self.plot_widget.nextRow()
-
-        vel_plot = self.plot_widget.addPlot(title="Velocity (m/s)")
-        self.vel_curve = vel_plot.plot(pen='c')
-
-        # --- Dashboard ---
-        dashboard = QtWidgets.QWidget()
-        dash_layout = QtWidgets.QVBoxLayout()
-        dashboard.setLayout(dash_layout)
-        dashboard.setFixedWidth(220)
-
-        def make_label(title):
-            lbl = QtWidgets.QLabel(title)
-            lbl.setStyleSheet("font-weight: bold; font-size: 13px; margin-top: 8px;")
-            return lbl
-
-        def make_value():
-            lbl = QtWidgets.QLabel("--")
-            lbl.setStyleSheet("font-family: Courier; font-size: 13px;")
-            return lbl
-
-        def make_cont_btn(label):
-            lbl = QtWidgets.QLabel(f"{label}: --")
-            lbl.setStyleSheet("background-color: grey; color: white; font-weight: bold; padding: 4px;")
-            lbl.setAlignment(QtCore.Qt.AlignCenter)
-            return lbl
-    
-        # Flight state
-        dash_layout.addWidget(make_label("Flight State"))
-        self.flight_state_val = QtWidgets.QLabel()
-        self.flight_state_val.setAlignment(QtCore.Qt.AlignCenter)
-        self.flight_state_val.setWordWrap(True)
-        self.flight_state_val.setMinimumHeight(72)
-        dash_layout.addWidget(self.flight_state_val)
         self.update_flight_state_indicator()
-
-        # Altitude
-        dash_layout.addWidget(make_label("Altitude"))
-        self.alt_val = make_value()
-        dash_layout.addWidget(self.alt_val)
-
-        # Velocity
-        dash_layout.addWidget(make_label("Velocity (m/s)"))
-        self.vel_val = make_value()
-        dash_layout.addWidget(self.vel_val)
-
-        # IMU Accel
-        dash_layout.addWidget(make_label("IMU Accel (mg)"))
-        self.xl_x_val = make_value()
-        self.xl_y_val = make_value()
-        self.xl_z_val = make_value()
-        dash_layout.addWidget(self.xl_x_val)
-        dash_layout.addWidget(self.xl_y_val)
-        dash_layout.addWidget(self.xl_z_val)
-
-        # Gyro
-        dash_layout.addWidget(make_label("Gyro (dps)"))
-        self.gy_x_val = make_value()
-        self.gy_y_val = make_value()
-        self.gy_z_val = make_value()
-        dash_layout.addWidget(self.gy_x_val)
-        dash_layout.addWidget(self.gy_y_val)
-        dash_layout.addWidget(self.gy_z_val)
-
-        # H3LIS
-        dash_layout.addWidget(make_label("H3LIS (mg)"))
-        self.hx_val = make_value()
-        self.hy_val = make_value()
-        self.hz_val = make_value()
-        dash_layout.addWidget(self.hx_val)
-        dash_layout.addWidget(self.hy_val)
-        dash_layout.addWidget(self.hz_val)
-
-        # Continuity
-        dash_layout.addWidget(make_label("Continuity"))
-        self.cont_main   = make_cont_btn("Main")
-        self.cont_drogue = make_cont_btn("Drogue")
-        dash_layout.addWidget(self.cont_main)
-        dash_layout.addWidget(self.cont_drogue)
-
-        # Arm code
-        dash_layout.addWidget(make_label("Arm Code"))
-        self.arm_code_display = QtWidgets.QLabel(self.arm_code)
-        self.arm_code_display.setStyleSheet(
-            "font-family: Courier; font-size: 22px; font-weight: bold; color: red;"
-        )
-        dash_layout.addWidget(self.arm_code_display)
-
-        self.arm_input = QtWidgets.QLineEdit()
-        self.arm_input.setPlaceholderText("Enter code to arm")
-        self.arm_input.setMaxLength(4)
-        dash_layout.addWidget(self.arm_input)
-
-        self.arm_btn = QtWidgets.QPushButton("ARM")
-        self.arm_btn.setStyleSheet("background-color: orange; font-weight: bold;")
-        self.arm_btn.clicked.connect(self.try_arm)
-        dash_layout.addWidget(self.arm_btn)
-
-        self.disarm_btn = QtWidgets.QPushButton("DISARM")
-        self.disarm_btn.setStyleSheet("background-color: #555; color: white; font-weight: bold;")
-        self.disarm_btn.setEnabled(False)
-        self.disarm_btn.clicked.connect(lambda: self.do_disarm(send_remote=True))
-        dash_layout.addWidget(self.disarm_btn)
-
-        # Commands
-        dash_layout.addWidget(make_label("Commands"))
-        self.fire_code_display = QtWidgets.QLabel("Fire Code: --")
-        self.fire_code_display.setStyleSheet(
-            "font-family: Courier; font-size: 13px; font-weight: bold; color: red;"
-        )
-        dash_layout.addWidget(self.fire_code_display)
-
-        self.fire_input = QtWidgets.QLineEdit()
-        self.fire_input.setPlaceholderText("Enter code to fire")
-        self.fire_input.setMaxLength(4)
-        self.fire_input.setEnabled(False)
-        dash_layout.addWidget(self.fire_input)
-
-        self.btn_fire_drogue = QtWidgets.QPushButton("Fire Drogue")
-        self.btn_fire_main   = QtWidgets.QPushButton("Fire Main")
-        self.btn_fire_drogue.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
-        self.btn_fire_main.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
-        self.btn_fire_drogue.setEnabled(False)
-        self.btn_fire_main.setEnabled(False)
-        self.btn_fire_drogue.clicked.connect(lambda: self.send_command(CMD_FIRE, 1))
-        self.btn_fire_main.clicked.connect(lambda: self.send_command(CMD_FIRE, 2))
-        dash_layout.addWidget(self.btn_fire_drogue)
-        dash_layout.addWidget(self.btn_fire_main)
-
-        dash_layout.addStretch()
-
-        # --- Terminal ---
-        self.terminal = QtWidgets.QTextEdit()
-        self.terminal.setReadOnly(True)
-        self.terminal.setFontFamily("Courier")
-
-        # --- Layout ---
-        v_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        v_splitter.addWidget(self.plot_widget)
-        v_splitter.addWidget(self.terminal)
-        v_splitter.setSizes([550, 150])
-
-        h_layout = QtWidgets.QHBoxLayout()
-        h_layout.addWidget(v_splitter)
-        h_layout.addWidget(dashboard)
-
-        central = QtWidgets.QWidget()
-        central.setLayout(h_layout)
-        self.setCentralWidget(central)
+        self._set_link_state(False)
 
         # Worker
         self.worker = LoRaWorker()
         self.worker.data_received.connect(self.on_lora_data)
-        self.worker.error_occurred.connect(lambda e: self.terminal.append(f"[ERROR] {e}"))
+        self.worker.error_occurred.connect(self._handle_radio_error)
 
         self.arm_timeout_timer = QtCore.QTimer(self)
         self.arm_timeout_timer.setSingleShot(True)
@@ -251,6 +141,392 @@ class MainWindow(QtWidgets.QMainWindow):
         self.disarm_timeout_timer.setSingleShot(True)
         self.disarm_timeout_timer.timeout.connect(self.handle_disarm_timeout)
         self.worker.start()
+
+    def _build_header(self):
+        header = QtWidgets.QFrame()
+        header.setObjectName("header")
+        header.setFixedHeight(96)
+        layout = QtWidgets.QHBoxLayout(header)
+        layout.setContentsMargins(20, 10, 20, 10)
+        layout.setSpacing(14)
+
+        brand_box = QtWidgets.QVBoxLayout()
+        brand_box.setSpacing(0)
+        brand = QtWidgets.QLabel("SHINGLEBACK")
+        brand.setObjectName("brand")
+        subtitle = QtWidgets.QLabel("ODIN  ·  GROUND CONTROL")
+        subtitle.setObjectName("subtitle")
+        brand_box.addWidget(brand)
+        brand_box.addWidget(subtitle)
+        layout.addLayout(brand_box)
+        layout.addStretch()
+
+        self.radio_status = QtWidgets.QLabel("●  RADIO WAITING")
+        self.radio_status.setObjectName("statusChip")
+        self.radio_status.setToolTip(
+            "915 MHz · SF7 · 125 kHz · CR 4/5 · explicit header · CRC · sync 0x12 · preamble 8"
+        )
+        self.gps_header_status = QtWidgets.QLabel("●  GPS NO DATA")
+        self.gps_header_status.setObjectName("statusChip")
+        self.header_state = QtWidgets.QLabel("IDLE")
+        self.header_state.setObjectName("statusChip")
+        layout.addWidget(self.radio_status)
+        layout.addWidget(self.gps_header_status)
+        layout.addWidget(self.header_state)
+
+        reset_btn = QtWidgets.QPushButton("RESET DISPLAY")
+        reset_btn.setToolTip("Clear plots, displayed readings, GPS status, continuity, and event log")
+        reset_btn.clicked.connect(self.clear_display)
+        layout.addWidget(reset_btn)
+        return header
+
+    def _configure_plot(self, plot, title, left_label):
+        plot.setTitle(
+            f"<span style='color:#f79322;font-size:15pt;font-weight:700'>"
+            f"&lt; {title} &gt;</span>"
+        )
+        plot.setLabel(
+            "left",
+            left_label,
+            color="#b4bbc4",
+            **{"font-size": "11pt", "font-weight": "700"},
+        )
+        plot.setLabel(
+            "bottom",
+            "Samples",
+            color="#89919c",
+            **{"font-size": "10pt"},
+        )
+        plot.showGrid(x=True, y=True, alpha=0.16)
+        plot.setMenuEnabled(False)
+        axis_font = QtGui.QFont("DejaVu Sans Mono", 10)
+        for axis_name in ("left", "bottom"):
+            axis = plot.getAxis(axis_name)
+            axis.setPen(pg.mkPen("#59616c"))
+            axis.setTextPen(pg.mkPen("#aab1ba"))
+            axis.setStyle(tickFont=axis_font)
+
+    def _build_data_workspace(self):
+        workspace = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(workspace)
+        layout.setContentsMargins(12, 12, 8, 12)
+        layout.setSpacing(8)
+
+        self.plot_widget = pg.GraphicsLayoutWidget()
+        self.plot_widget.setBackground("#07090b")
+
+        alt_plot = self.plot_widget.addPlot(row=0, col=0)
+        self._configure_plot(alt_plot, "ALTITUDE", "Altitude (m)")
+        self.alt_curve = alt_plot.plot(pen=pg.mkPen("#f63356", width=2))
+
+        vel_plot = self.plot_widget.addPlot(row=0, col=1)
+        self._configure_plot(vel_plot, "VERTICAL VELOCITY", "Velocity (m/s)")
+        self.vel_curve = vel_plot.plot(pen=pg.mkPen("#f79322", width=2))
+
+        gy_plot = self.plot_widget.addPlot(row=1, col=0)
+        self._configure_plot(gy_plot, "ANGULAR VELOCITY · GYROSCOPE", "Rotation rate (dps)")
+        gy_plot.addLegend(offset=(10, 10), labelTextSize="10pt")
+        self.gy_x_curve = gy_plot.plot(pen=pg.mkPen("#f63356", width=1.5), name="X")
+        self.gy_y_curve = gy_plot.plot(pen=pg.mkPen("#36dd76", width=1.5), name="Y")
+        self.gy_z_curve = gy_plot.plot(pen=pg.mkPen("#5bb4f0", width=1.5), name="Z")
+
+        xl_plot = self.plot_widget.addPlot(row=1, col=1)
+        self._configure_plot(xl_plot, "LINEAR ACCELERATION · IMU", "Acceleration (mg)")
+        xl_plot.addLegend(offset=(10, 10), labelTextSize="10pt")
+        self.xl_x_curve = xl_plot.plot(pen=pg.mkPen("#f63356", width=1.5), name="X")
+        self.xl_y_curve = xl_plot.plot(pen=pg.mkPen("#36dd76", width=1.5), name="Y")
+        self.xl_z_curve = xl_plot.plot(pen=pg.mkPen("#5bb4f0", width=1.5), name="Z")
+
+        self.terminal = QtWidgets.QTextEdit()
+        self.terminal.setReadOnly(True)
+        self.terminal.setPlaceholderText("Radio events and decoded packets appear here…")
+        self.terminal.document().setMaximumBlockCount(1500)
+
+        terminal_bar = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel("EVENT LOG")
+        title.setObjectName("sectionTitle")
+        self.packet_counter = QtWidgets.QLabel("0 PACKETS")
+        self.packet_counter.setObjectName("muted")
+        terminal_bar.addWidget(title)
+        terminal_bar.addStretch()
+        terminal_bar.addWidget(self.packet_counter)
+
+        plot_terminal_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        plot_terminal_split.setHandleWidth(3)
+        plot_terminal_split.addWidget(self.plot_widget)
+        terminal_container = QtWidgets.QWidget()
+        terminal_layout = QtWidgets.QVBoxLayout(terminal_container)
+        terminal_layout.setContentsMargins(0, 0, 0, 0)
+        terminal_layout.setSpacing(5)
+        terminal_layout.addLayout(terminal_bar)
+        terminal_layout.addWidget(self.terminal)
+        plot_terminal_split.addWidget(terminal_container)
+        plot_terminal_split.setSizes([610, 220])
+        layout.addWidget(plot_terminal_split)
+        return workspace
+
+    def _card(self, title):
+        card = QtWidgets.QFrame()
+        card.setObjectName("card")
+        layout = QtWidgets.QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+        heading = QtWidgets.QLabel(title)
+        heading.setObjectName("sectionTitle")
+        layout.addWidget(heading)
+        return card, layout
+
+    def _metric(self, name, initial="--"):
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+        label = QtWidgets.QLabel(name.upper())
+        label.setObjectName("metricName")
+        value = QtWidgets.QLabel(initial)
+        value.setObjectName("metricValue")
+        value.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        layout.addWidget(label)
+        layout.addWidget(value)
+        return box, value
+
+    def _metric_grid(self, items, columns=2):
+        grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(9)
+        for index, (name, attribute, initial) in enumerate(items):
+            widget, value = self._metric(name, initial)
+            setattr(self, attribute, value)
+            grid.addWidget(widget, index // columns, index % columns)
+        return grid
+
+    def _indicator(self, label):
+        indicator = QtWidgets.QLabel(f"●  {label}: --")
+        indicator.setObjectName("statusChip")
+        indicator.setAlignment(QtCore.Qt.AlignCenter)
+        return indicator
+
+    def _build_dashboard(self):
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(460)
+        scroll.setMaximumWidth(540)
+        dashboard = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(dashboard)
+        layout.setContentsMargins(8, 12, 12, 12)
+        layout.setSpacing(9)
+
+        flight_card, flight_layout = self._card("FLIGHT COMPUTER")
+        self.flight_state_val = QtWidgets.QLabel()
+        self.flight_state_val.setAlignment(QtCore.Qt.AlignCenter)
+        self.flight_state_val.setMinimumHeight(50)
+        flight_layout.addWidget(self.flight_state_val)
+        flight_layout.addLayout(self._metric_grid([
+            ("Altitude", "alt_val", "-- m"),
+            ("Velocity", "vel_val", "-- m/s"),
+            ("IMU accel X", "xl_x_val", "-- mg"),
+            ("IMU accel Y", "xl_y_val", "-- mg"),
+            ("IMU accel Z", "xl_z_val", "-- mg"),
+            ("H3LIS X", "hx_val", "-- mg"),
+            ("H3LIS Y", "hy_val", "-- mg"),
+            ("H3LIS Z", "hz_val", "-- mg"),
+            ("Gyro X", "gy_x_val", "-- dps"),
+            ("Gyro Y", "gy_y_val", "-- dps"),
+            ("Gyro Z", "gy_z_val", "-- dps"),
+        ]))
+        layout.addWidget(flight_card)
+
+        gps_card, gps_layout = self._card("GPS RECEIVER")
+        uart_info = QtWidgets.QLabel("UART5  ·  9600 BAUD  ·  8-N-1  |  TX → PD2 / RX ← PC12")
+        uart_info.setObjectName("muted")
+        uart_info.setWordWrap(True)
+        gps_layout.addWidget(uart_info)
+        self.gps_fix_status = self._indicator("FIX")
+        gps_layout.addWidget(self.gps_fix_status)
+        gps_layout.addLayout(self._metric_grid([
+            ("Latitude", "gps_lat_val", "--°"),
+            ("Longitude", "gps_lon_val", "--°"),
+            ("GPS altitude", "gps_alt_val", "-- m MSL"),
+            ("Ground speed", "gps_speed_val", "-- m/s"),
+            ("Satellites", "gps_sat_val", "--"),
+            ("Fix quality", "gps_quality_val", "--"),
+            ("Course", "gps_course_val", "--°"),
+            ("UTC", "gps_utc_val", "--:--:--.---"),
+            ("Data age", "gps_age_val", "-- ms"),
+            ("Sequence", "gps_seq_val", "--"),
+        ]))
+        flags = QtWidgets.QHBoxLayout()
+        self.gps_gga_status = self._indicator("GGA")
+        self.gps_rmc_status = self._indicator("RMC")
+        self.gps_uart_status = self._indicator("UART")
+        flags.addWidget(self.gps_gga_status)
+        flags.addWidget(self.gps_rmc_status)
+        flags.addWidget(self.gps_uart_status)
+        gps_layout.addLayout(flags)
+        layout.addWidget(gps_card)
+
+        continuity_card, continuity_layout = self._card("PYRO CONTINUITY")
+        self.cont_main = self._indicator("MAIN")
+        self.cont_drogue = self._indicator("DROGUE")
+        continuity_layout.addWidget(self.cont_main)
+        continuity_layout.addWidget(self.cont_drogue)
+        layout.addWidget(continuity_card)
+
+        command_card, command_layout = self._card("FLIGHT COMMANDS")
+        code_row = QtWidgets.QHBoxLayout()
+        code_label = QtWidgets.QLabel("ARM CODE")
+        code_label.setObjectName("metricName")
+        self.arm_code_display = QtWidgets.QLabel(self.arm_code)
+        self.arm_code_display.setObjectName("metricValue")
+        code_row.addWidget(code_label)
+        code_row.addStretch()
+        code_row.addWidget(self.arm_code_display)
+        command_layout.addLayout(code_row)
+
+        self.arm_input = QtWidgets.QLineEdit()
+        self.arm_input.setPlaceholderText("Enter code to arm")
+        self.arm_input.setMaxLength(4)
+        command_layout.addWidget(self.arm_input)
+        button_row = QtWidgets.QHBoxLayout()
+        self.arm_btn = QtWidgets.QPushButton("ARM")
+        self.arm_btn.setObjectName("primary")
+        self.arm_btn.clicked.connect(self.try_arm)
+        self.disarm_btn = QtWidgets.QPushButton("DISARM")
+        self.disarm_btn.setEnabled(False)
+        self.disarm_btn.clicked.connect(lambda: self.do_disarm(send_remote=True))
+        button_row.addWidget(self.arm_btn)
+        button_row.addWidget(self.disarm_btn)
+        command_layout.addLayout(button_row)
+
+        self.fire_code_display = QtWidgets.QLabel("Fire Code: --")
+        self.fire_code_display.setObjectName("muted")
+        self.fire_input = QtWidgets.QLineEdit()
+        self.fire_input.setPlaceholderText("Enter code to fire")
+        self.fire_input.setMaxLength(4)
+        self.fire_input.setEnabled(False)
+        self.btn_fire_drogue = QtWidgets.QPushButton("FIRE DROGUE")
+        self.btn_fire_main = QtWidgets.QPushButton("FIRE MAIN")
+        self.btn_fire_drogue.setObjectName("danger")
+        self.btn_fire_main.setObjectName("danger")
+        self.btn_fire_drogue.setEnabled(False)
+        self.btn_fire_main.setEnabled(False)
+        self.btn_fire_drogue.clicked.connect(lambda: self.send_command(CMD_FIRE, 1))
+        self.btn_fire_main.clicked.connect(lambda: self.send_command(CMD_FIRE, 2))
+        command_layout.addWidget(self.fire_code_display)
+        command_layout.addWidget(self.fire_input)
+        fire_row = QtWidgets.QHBoxLayout()
+        fire_row.addWidget(self.btn_fire_drogue)
+        fire_row.addWidget(self.btn_fire_main)
+        command_layout.addLayout(fire_row)
+        layout.addWidget(command_card)
+        layout.addStretch()
+
+        scroll.setWidget(dashboard)
+        return scroll
+
+    def _set_indicator(self, widget, label, state, *, fault=False):
+        if state is None:
+            text = "--"
+            color = "#77808b"
+            border = "#343a42"
+            background = "#15191e"
+        elif fault:
+            text = "ERROR" if state else "OK"
+            color = "#ff6573" if state else "#36dd76"
+            border = "#9e2430" if state else "#197442"
+            background = "#2a0d11" if state else "#092016"
+        else:
+            text = "OK" if state else "NO"
+            color = "#36dd76" if state else "#ff6573"
+            border = "#197442" if state else "#9e2430"
+            background = "#092016" if state else "#2a0d11"
+        widget.setText(f"●  {label}: {text}")
+        widget.setStyleSheet(
+            f"color: {color}; background: {background}; border: 1px solid {border}; "
+            "border-radius: 3px; padding: 6px 8px; font-family: DejaVu Sans Mono; font-weight: 700;"
+        )
+
+    def _set_link_state(self, receiving, *, error=False):
+        if error:
+            self.radio_status.setText("●  RADIO ERROR")
+            color, border, background = "#ff6573", "#9e2430", "#2a0d11"
+        elif receiving:
+            self.radio_status.setText("●  RADIO RECEIVING")
+            color, border, background = "#36dd76", "#197442", "#092016"
+        else:
+            self.radio_status.setText("●  RADIO WAITING")
+            color, border, background = "#f79322", "#6a3e0b", "#211507"
+        self.radio_status.setStyleSheet(
+            f"color: {color}; background: {background}; border: 1px solid {border}; "
+            "border-radius: 3px; padding: 6px 10px; font-family: DejaVu Sans Mono; font-weight: 700;"
+        )
+
+    def _handle_radio_error(self, message):
+        self._set_link_state(False, error=True)
+        self.terminal.append(f"[ERROR] {message}")
+
+    @staticmethod
+    def _format_utc(utc_ms):
+        utc_ms %= 86_400_000
+        hours, remainder = divmod(utc_ms, 3_600_000)
+        minutes, remainder = divmod(remainder, 60_000)
+        seconds, milliseconds = divmod(remainder, 1000)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+
+    def clear_display(self):
+        """Clear displayed history without stopping the radio or changing arm state."""
+        for series in (
+            self.alt, self.vel,
+            self.gy_x, self.gy_y, self.gy_z,
+            self.xl_x, self.xl_y, self.xl_z,
+        ):
+            series.clear()
+        for curve in (
+            self.alt_curve, self.vel_curve,
+            self.gy_x_curve, self.gy_y_curve, self.gy_z_curve,
+            self.xl_x_curve, self.xl_y_curve, self.xl_z_curve,
+        ):
+            curve.setData([])
+
+        for value, placeholder in (
+            (self.alt_val, "-- m"),
+            (self.vel_val, "-- m/s"),
+            (self.xl_x_val, "-- mg"),
+            (self.xl_y_val, "-- mg"),
+            (self.xl_z_val, "-- mg"),
+            (self.gy_x_val, "-- dps"),
+            (self.gy_y_val, "-- dps"),
+            (self.gy_z_val, "-- dps"),
+            (self.hx_val, "-- mg"),
+            (self.hy_val, "-- mg"),
+            (self.hz_val, "-- mg"),
+            (self.gps_lat_val, "--°"),
+            (self.gps_lon_val, "--°"),
+            (self.gps_alt_val, "-- m MSL"),
+            (self.gps_speed_val, "-- m/s"),
+            (self.gps_sat_val, "--"),
+            (self.gps_quality_val, "--"),
+            (self.gps_course_val, "--°"),
+            (self.gps_utc_val, "--:--:--.---"),
+            (self.gps_age_val, "-- ms"),
+            (self.gps_seq_val, "--"),
+        ):
+            value.setText(placeholder)
+
+        self._set_indicator(self.cont_main, "MAIN", None)
+        self._set_indicator(self.cont_drogue, "DROGUE", None)
+        self._set_indicator(self.gps_fix_status, "FIX", None)
+        self._set_indicator(self.gps_gga_status, "GGA", None)
+        self._set_indicator(self.gps_rmc_status, "RMC", None)
+        self._set_indicator(self.gps_uart_status, "UART", None, fault=True)
+        self.gps_header_status.setText("●  GPS NO DATA")
+        self.gps_header_status.setStyleSheet("")
+        self.packet_count = 0
+        self.gps_packet_count = 0
+        self.packet_counter.setText("0 PACKETS")
+        self._set_link_state(False)
+        self.terminal.clear()
 
     def try_arm(self):
         if self.arm_input.text() == self.arm_code:
@@ -276,7 +552,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_input.setEnabled(False)
         self.arm_code_display.setText("ARMING...")
         self.arm_code_display.setStyleSheet(
-            "font-size: 18px; font-weight: bold; color: orange;"
+            "font-family: DejaVu Sans Mono; font-size: 14pt; font-weight: bold; color: #f79322;"
         )
         self.terminal.append("[SYS] ARM REQUEST QUEUED - waiting for continuity packet")
         self.terminal.ensureCursorVisible()
@@ -319,7 +595,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_input.setEnabled(False)
         self.arm_code_display.setText("ARMED")
         self.arm_code_display.setStyleSheet(
-            "font-size: 18px; font-weight: bold; color: lime;"
+            "font-family: DejaVu Sans Mono; font-size: 14pt; font-weight: bold; color: #36dd76;"
         )
         self.terminal.append("[SYS] ARM CONFIRMED - flight computer reported ARMED")
         self.terminal.ensureCursorVisible()
@@ -341,7 +617,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_input.setStyleSheet("")
         self.arm_code_display.setText(self.arm_code)
         self.arm_code_display.setStyleSheet(
-            "font-family: Courier; font-size: 22px; font-weight: bold; color: red;"
+            "font-family: DejaVu Sans Mono; font-size: 16pt; font-weight: bold; color: #ff6573;"
         )
         if arm_was_sent:
             self.terminal.append("[SYS] ARM TIMEOUT - ARMED telemetry not received")
@@ -392,8 +668,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.flight_state_val.setText(name)
         self.flight_state_val.setStyleSheet(
-            "font-size: 22px; font-weight: bold; padding: 12px 6px; "
-            f"background-color: {bg_color}; color: {fg_color}; border-radius: 4px;"
+            "font-family: DejaVu Sans Mono; font-size: 16pt; font-weight: 800; padding: 12px 8px; "
+            f"background-color: {bg_color}; color: {fg_color}; border-radius: 3px;"
+        )
+        self.header_state.setText(name)
+        self.header_state.setStyleSheet(
+            f"color: {fg_color}; background: {bg_color}; border: 1px solid {bg_color}; "
+            "border-radius: 3px; padding: 6px 10px; font-family: DejaVu Sans Mono; font-weight: 800;"
         )
 
     def update_command_buttons(self):
@@ -462,7 +743,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_input.setEnabled(False)
         self.arm_code_display.setText("DISARMING...")
         self.arm_code_display.setStyleSheet(
-            "font-size: 18px; font-weight: bold; color: orange;"
+            "font-family: DejaVu Sans Mono; font-size: 14pt; font-weight: bold; color: #f79322;"
         )
         self.terminal.append("[SYS] DISARM REQUEST QUEUED - waiting for continuity packet")
         self.terminal.ensureCursorVisible()
@@ -536,7 +817,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_command_buttons()
             self.arm_code_display.setText("ARMED")
             self.arm_code_display.setStyleSheet(
-                "font-size: 18px; font-weight: bold; color: lime;"
+                "font-family: DejaVu Sans Mono; font-size: 14pt; font-weight: bold; color: #36dd76;"
             )
             self.arm_btn.setEnabled(False)
             self.arm_input.setEnabled(False)
@@ -573,7 +854,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arm_code = str(random.randint(1000, 9999))
         self.arm_code_display.setText(self.arm_code)
         self.arm_code_display.setStyleSheet(
-            "font-family: Courier; font-size: 22px; font-weight: bold; color: red;"
+            "font-family: DejaVu Sans Mono; font-size: 16pt; font-weight: bold; color: #ff6573;"
         )
         self.terminal.append(message)
         self.terminal.ensureCursorVisible()
@@ -607,17 +888,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # send multiple FIRE commands. Manual disarm remains available.
 
     def on_lora_data(self, raw: bytes):
-        if len(raw) < 2:
-            self.terminal.append(f"[BAD PACKET] too short: {raw.hex()}")
+        self.packet_count += 1
+        self.packet_counter.setText(
+            f"{self.packet_count} PACKETS  ·  {self.gps_packet_count} GPS"
+        )
+        self._set_link_state(True)
+
+        pkt_type = packet_type(raw)
+        if pkt_type is None:
+            self.terminal.append(
+                f"[BAD PACKET] invalid receiver header/sync len={len(raw)} {raw.hex()}"
+            )
             return
-        
-        self.terminal.append(f"[RAW] type={raw[1]:#04x} len={len(raw)}") 
 
-        pkt_type = raw[1]
+        self.terminal.append(f"[RAW] type={pkt_type:#04x} len={len(raw)}")
 
-        if pkt_type == 0x01:
+        if pkt_type == PKT_TELEMETRY:
             self._handle_telemetry(raw)
-        elif pkt_type == 0x02:
+        elif pkt_type == PKT_GPS:
+            self._handle_gps(raw)
+        elif pkt_type == PKT_CONTINUITY:
             self._handle_continuity(raw)
         else:
             self.terminal.append(f"[UNKNOWN PKT] type={pkt_type:#04x} {raw.hex()}")
@@ -667,17 +957,78 @@ class MainWindow(QtWidgets.QMainWindow):
         self.xl_y_curve.setData(list(self.xl_y))
         self.xl_z_curve.setData(list(self.xl_z))
 
-        self.alt_val.setText(f"Alt: {alt:.2f} m")
+        self.alt_val.setText(f"{alt:.2f} m")
         self.vel_val.setText(f"{vel:.2f} m/s")
-        self.xl_x_val.setText(f"X: {xl_x:.1f}")
-        self.xl_y_val.setText(f"Y: {xl_y:.1f}")
-        self.xl_z_val.setText(f"Z: {xl_z:.1f}")
-        self.gy_x_val.setText(f"X: {gy_x:.1f}")
-        self.gy_y_val.setText(f"Y: {gy_y:.1f}")
-        self.gy_z_val.setText(f"Z: {gy_z:.1f}")
-        self.hx_val.setText(f"X: {hx:.1f}")
-        self.hy_val.setText(f"Y: {hy:.1f}")
-        self.hz_val.setText(f"Z: {hz:.1f}")
+        self.xl_x_val.setText(f"{xl_x:.1f} mg")
+        self.xl_y_val.setText(f"{xl_y:.1f} mg")
+        self.xl_z_val.setText(f"{xl_z:.1f} mg")
+        self.gy_x_val.setText(f"{gy_x:.1f} dps")
+        self.gy_y_val.setText(f"{gy_y:.1f} dps")
+        self.gy_z_val.setText(f"{gy_z:.1f} dps")
+        self.hx_val.setText(f"{hx:.1f} mg")
+        self.hy_val.setText(f"{hy:.1f} mg")
+        self.hz_val.setText(f"{hz:.1f} mg")
+
+    def _handle_gps(self, raw: bytes):
+        parsed = parse_gps(raw)
+        if parsed is None:
+            self.gps_header_status.setText("●  GPS PACKET ERROR")
+            self.gps_header_status.setStyleSheet(
+                "color: #ff6573; background: #2a0d11; border: 1px solid #9e2430; "
+                "border-radius: 3px; padding: 6px 10px; font-family: DejaVu Sans Mono; font-weight: 700;"
+            )
+            self.terminal.append(f"[BAD GPS] length/header/type/CRC check failed: {raw.hex()}")
+            return
+
+        self.gps_packet_count += 1
+        self.packet_counter.setText(
+            f"{self.packet_count} PACKETS  ·  {self.gps_packet_count} GPS"
+        )
+        self.flight_state = parsed["flight_state"]
+        self.update_flight_state_indicator()
+        if self.pending_arm and self.flight_state == self.STATE_ARMED:
+            self.confirm_arm()
+        self.update_command_buttons()
+
+        fix_valid = parsed["fix_valid"]
+        self._set_indicator(self.gps_fix_status, "FIX", fix_valid)
+        self._set_indicator(self.gps_gga_status, "GGA", parsed["gga_received"])
+        self._set_indicator(self.gps_rmc_status, "RMC", parsed["rmc_active"])
+        self._set_indicator(self.gps_uart_status, "UART", parsed["uart_error"], fault=True)
+
+        if fix_valid:
+            self.gps_header_status.setText("●  GPS FIX VALID")
+            color, border, background = "#36dd76", "#197442", "#092016"
+        else:
+            self.gps_header_status.setText("●  GPS NO FIX")
+            color, border, background = "#ffd166", "#80641d", "#251d08"
+        self.gps_header_status.setStyleSheet(
+            f"color: {color}; background: {background}; border: 1px solid {border}; "
+            "border-radius: 3px; padding: 6px 10px; font-family: DejaVu Sans Mono; font-weight: 700;"
+        )
+
+        self.gps_lat_val.setText(f"{parsed['latitude']:.7f}°")
+        self.gps_lon_val.setText(f"{parsed['longitude']:.7f}°")
+        self.gps_alt_val.setText(f"{parsed['altitude_m']:.3f} m MSL")
+        self.gps_speed_val.setText(f"{parsed['ground_speed_mps']:.2f} m/s")
+        self.gps_sat_val.setText(str(parsed["satellites"]))
+        self.gps_quality_val.setText(str(parsed["fix_quality"]))
+        self.gps_course_val.setText(f"{parsed['course_deg']:.2f}°")
+        self.gps_utc_val.setText(self._format_utc(parsed["utc_ms"]))
+        if parsed["information_age_ms"] == 65535:
+            self.gps_age_val.setText("≥ 65.535 s")
+        else:
+            self.gps_age_val.setText(f"{parsed['information_age_ms']} ms")
+        self.gps_seq_val.setText(str(parsed["sequence"]))
+
+        self.terminal.append(
+            f"[GPS {parsed['sequence']:03d}] "
+            f"Fix: {'VALID' if fix_valid else 'NO'} | Q:{parsed['fix_quality']} | "
+            f"Sats:{parsed['satellites']} | Lat:{parsed['latitude']:.7f} | "
+            f"Lon:{parsed['longitude']:.7f} | Alt:{parsed['altitude_m']:.3f}m MSL | "
+            f"Speed:{parsed['ground_speed_mps']:.2f}m/s | Course:{parsed['course_deg']:.2f}° | "
+            f"Age:{parsed['information_age_ms']}ms | State:{parsed['flight_state_name']}"
+        )
 
     def _handle_continuity(self, raw: bytes):
         parsed = parse_continuity(raw)
@@ -691,15 +1042,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.send_disarm_request()
         self.check_disarm_confirmation()
 
-        def update_btn(btn, label, ok):
-            btn.setText(f"{label}: {'OK' if ok else 'OPEN'}")
-            color = "lime" if ok else "red"
-            btn.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
-            btn.repaint()
-        update_btn(self.cont_main,   "Main",   parsed['main'])
-        update_btn(self.cont_drogue, "Drogue", parsed['drogue'])
+        self._set_indicator(self.cont_main, "MAIN", parsed['main'])
+        self._set_indicator(self.cont_drogue, "DROGUE", parsed['drogue'])
 
         self.terminal.append(
             f"[CONT] Main: {'OK' if parsed['main'] else 'OPEN'} | "
             f"Drogue: {'OK' if parsed['drogue'] else 'OPEN'}"
         )
+
+    def closeEvent(self, event):
+        self.worker.stop()
+        event.accept()
